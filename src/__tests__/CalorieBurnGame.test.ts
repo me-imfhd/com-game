@@ -3,15 +3,26 @@ import { gameStorage } from "../storage/GameStorage.js";
 import { MoneyUtils } from "../types/index.js";
 import { v4 as uuidv4 } from "uuid";
 import type { UUID } from "../types/index.js";
+import * as fs from "fs";
+import * as path from "path";
 
 describe("Calorie Burn Challenge Game - Complete Flow", () => {
   let gameId: UUID;
   let gameMasterId: UUID;
   let players: { id: UUID; name: string; multiplier: number }[];
+  let testOutput: string[] = [];
+
+  // Helper function to log both to console and capture for file
+  const logAndCapture = (message: string) => {
+    console.log(message);
+    testOutput.push(message);
+  };
 
   beforeEach(() => {
     // Clear storage before each test
     gameStorage.clear();
+    // Clear output capture
+    testOutput = [];
 
     // Setup test data
     gameMasterId = uuidv4() as UUID;
@@ -25,17 +36,19 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
   });
 
   test("Complete Calorie Burn Game Flow", async () => {
-    console.log("🔥 Starting Calorie Burn Challenge Game Test");
-    console.log(
+    logAndCapture("🔥 Starting Calorie Burn Challenge Game Test");
+    logAndCapture(
       "Target: Burn 1000 calories with 5 checkpoints (200 calories each)"
     );
-    console.log("Stack size: $10.00, Players with different multipliers");
-    console.log("============================================================");
+    logAndCapture("Stack size: $10.00, Players with different multipliers");
+    logAndCapture(
+      "============================================================"
+    );
 
     // ================================================================================
     // STEP 1: GameMaster creates the game
     // ================================================================================
-    console.log("\n🎮 STEP 1: GameMaster creates the calorie burn game");
+    logAndCapture("\n🎮 STEP 1: GameMaster creates the calorie burn game");
 
     const createGameResult = gameService.createGame({
       gameMasterId: gameMasterId,
@@ -62,15 +75,15 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
     const game = createGameResult.value;
     gameId = game.id;
 
-    console.log(`✅ Game created: ${game.title}`);
-    console.log(`   Stack size: ${MoneyUtils.formatCents(game.stackSize)}`);
-    console.log(`   Total checkpoints: ${game.totalCheckpoints}`);
-    console.log(`   Game ID: ${gameId}`);
+    logAndCapture(`✅ Game created: ${game.title}`);
+    logAndCapture(`   Stack size: ${MoneyUtils.formatCents(game.stackSize)}`);
+    logAndCapture(`   Total checkpoints: ${game.totalCheckpoints}`);
+    logAndCapture(`   Game ID: ${gameId}`);
 
     // ================================================================================
     // STEP 2: Players join the game with different stakes
     // ================================================================================
-    console.log("\n👥 STEP 2: Players join the game");
+    logAndCapture("\n👥 STEP 2: Players join the game");
 
     for (const player of players) {
       const joinResult = gameService.joinGame(gameId, {
@@ -81,7 +94,7 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
 
       expect(joinResult.isOk()).toBe(true);
       const stake = 1000 * player.multiplier; // $10 * multiplier in cents
-      console.log(
+      logAndCapture(
         `   ${player.name} joined with ${
           player.multiplier
         }x multiplier = ${MoneyUtils.formatCents(stake)} stake`
@@ -91,16 +104,15 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
     const gameAfterJoins = gameService.getGame(gameId);
     if (gameAfterJoins.isErr()) throw new Error("Failed to get game");
     const totalPool = gameAfterJoins.value.totalPool;
-    console.log(totalPool);
-    console.log(`\n💰 Total pool: ${MoneyUtils.formatCents(totalPool)}`);
-    console.log(
+    logAndCapture(`\n💰 Total pool: ${MoneyUtils.formatCents(totalPool)}`);
+    logAndCapture(
       `   Players: ${gameAfterJoins.value.players.length}/${gameAfterJoins.value.maxPlayers}`
     );
 
     // ================================================================================
     // STEP 3: GameMaster starts the game
     // ================================================================================
-    console.log("\n🚀 STEP 3: GameMaster starts the game");
+    logAndCapture("\n🚀 STEP 3: GameMaster starts the game");
 
     const startResult = gameService.startGame({
       gameId: gameId,
@@ -109,15 +121,15 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
 
     expect(startResult.isOk()).toBe(true);
     if (startResult.isErr()) throw new Error("Failed to start game");
-    console.log(`✅ Game started! State: ${startResult.value.state}`);
+    logAndCapture(`✅ Game started! State: ${startResult.value.state}`);
 
     // ================================================================================
     // STEP 4: Players submit proofs for checkpoints and get verified
     // ================================================================================
-    console.log("\n🏃‍♀️ STEP 4: Players burn calories and submit proofs");
+    logAndCapture("\n🏃‍♀️ STEP 4: Players burn calories and submit proofs");
 
     // Alice completes all 5 checkpoints (will be a winner)
-    console.log("\n👤 Alice's journey (completes all checkpoints):");
+    logAndCapture("\n👤 Alice's journey (completes all checkpoints):");
     for (let checkpoint = 1; checkpoint <= 5; checkpoint++) {
       // Submit proof
       const submitResult = gameService.submitCheckIn(gameId, {
@@ -128,7 +140,7 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
       expect(submitResult.isOk()).toBe(true);
       if (submitResult.isErr()) throw new Error("Failed to submit check-in");
 
-      console.log(`   📝 Submitted proof for checkpoint ${checkpoint}`);
+      logAndCapture(`   📝 Submitted proof for checkpoint ${checkpoint}`);
 
       // GameMaster verifies
       const verifyResult = gameService.verifyCheckIn(gameId, {
@@ -138,11 +150,11 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
       });
       expect(verifyResult.isOk()).toBe(true);
 
-      console.log(`   ✅ Checkpoint ${checkpoint} approved by GameMaster`);
+      logAndCapture(`   ✅ Checkpoint ${checkpoint} approved by GameMaster`);
     }
 
     // Bob completes 3 checkpoints, then cashes out
-    console.log("\n👤 Bob's journey (cashes out at checkpoint 3):");
+    logAndCapture("\n👤 Bob's journey (cashes out at checkpoint 3):");
     for (let checkpoint = 1; checkpoint <= 3; checkpoint++) {
       const submitResult = gameService.submitCheckIn(gameId, {
         playerId: players[1].id,
@@ -161,7 +173,7 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
       });
       expect(verifyResult.isOk()).toBe(true);
 
-      console.log(`   ✅ Checkpoint ${checkpoint} completed`);
+      logAndCapture(`   ✅ Checkpoint ${checkpoint} completed`);
     }
 
     // Bob cashes out
@@ -172,10 +184,10 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
     expect(bobCashoutResult.isOk()).toBe(true);
     if (bobCashoutResult.isErr()) throw new Error("Failed to cash out");
     const bobCashout = bobCashoutResult.value;
-    console.log(`   💸 Bob cashed out: ${bobCashout.description}`);
+    logAndCapture(`   💸 Bob cashed out: ${bobCashout.description}`);
 
     // Charlie completes all 5 checkpoints (will be a winner)
-    console.log("\n👤 Charlie's journey (completes all checkpoints):");
+    logAndCapture("\n👤 Charlie's journey (completes all checkpoints):");
     for (let checkpoint = 1; checkpoint <= 5; checkpoint++) {
       const submitResult = gameService.submitCheckIn(gameId, {
         playerId: players[2].id,
@@ -192,11 +204,11 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
       });
       expect(verifyResult.isOk()).toBe(true);
 
-      console.log(`   ✅ Checkpoint ${checkpoint} completed`);
+      logAndCapture(`   ✅ Checkpoint ${checkpoint} completed`);
     }
 
     // Diana completes 2 checkpoints, then cashes out
-    console.log("\n👤 Diana's journey (cashes out at checkpoint 2):");
+    logAndCapture("\n👤 Diana's journey (cashes out at checkpoint 2):");
     for (let checkpoint = 1; checkpoint <= 2; checkpoint++) {
       const submitResult = gameService.submitCheckIn(gameId, {
         playerId: players[3].id,
@@ -213,7 +225,7 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
       });
       expect(verifyResult.isOk()).toBe(true);
 
-      console.log(`   ✅ Checkpoint ${checkpoint} completed`);
+      logAndCapture(`   ✅ Checkpoint ${checkpoint} completed`);
     }
 
     // Diana cashes out
@@ -224,10 +236,10 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
     expect(dianaCashoutResult.isOk()).toBe(true);
     if (dianaCashoutResult.isErr()) throw new Error("Failed to cash out");
     const dianaCashout = dianaCashoutResult.value;
-    console.log(`   💸 Diana cashed out: ${dianaCashout.description}`);
+    logAndCapture(`   💸 Diana cashed out: ${dianaCashout.description}`);
 
     // Eve completes 1 checkpoint, then cashes out
-    console.log("\n👤 Eve's journey (cashes out at checkpoint 1):");
+    logAndCapture("\n👤 Eve's journey (cashes out at checkpoint 1):");
     const submitResult = gameService.submitCheckIn(gameId, {
       playerId: players[4].id,
       checkpointNumber: 1,
@@ -250,13 +262,13 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
     expect(eveCashoutResult.isOk()).toBe(true);
     if (eveCashoutResult.isErr()) throw new Error("Failed to cash out");
     const eveCashout = eveCashoutResult.value;
-    console.log(`   ✅ Checkpoint 1 completed`);
-    console.log(`   💸 Eve cashed out: ${eveCashout.description}`);
+    logAndCapture(`   ✅ Checkpoint 1 completed`);
+    logAndCapture(`   💸 Eve cashed out: ${eveCashout.description}`);
 
     // ================================================================================
     // STEP 5: GameMaster ends the game and distributes bonuses
     // ================================================================================
-    console.log("\n🏁 STEP 5: GameMaster ends the game");
+    logAndCapture("\n🏁 STEP 5: GameMaster ends the game");
 
     const endResult = gameService.endGame({
       gameId: gameId,
@@ -266,26 +278,28 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
     if (endResult.isErr()) throw new Error("Failed to end game");
 
     const finalGame = endResult.value;
-    console.log(`✅ Game ended! Final state: ${finalGame.state}`);
+    logAndCapture(`✅ Game ended! Final state: ${finalGame.state}`);
 
     // ================================================================================
     // STEP 6: Calculate and display final results
     // ================================================================================
-    console.log("\n📊 FINAL RESULTS & PAYOUTS");
-    console.log("============================================================");
+    logAndCapture("\n📊 FINAL RESULTS & PAYOUTS");
+    logAndCapture(
+      "============================================================"
+    );
 
-    console.log(`\n💰 Financial Summary:`);
-    console.log(
+    logAndCapture(`\n💰 Financial Summary:`);
+    logAndCapture(
       `   Total Pool: ${MoneyUtils.formatCents(finalGame.totalPool)}`
     );
-    console.log(
+    logAndCapture(
       `   Total Cashouts: ${MoneyUtils.formatCents(finalGame.totalCashouts)}`
     );
-    console.log(
+    logAndCapture(
       `   Bonus Pool: ${MoneyUtils.formatCents(finalGame.bonusPool)}`
     );
 
-    console.log(`\n🏆 Winners (completed all checkpoints):`);
+    logAndCapture(`\n🏆 Winners (completed all checkpoints):`);
     const winners = finalGame.players.filter(
       (p) => p.foldedAtCheckpoint === undefined
     );
@@ -295,16 +309,16 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
       const bonus = winner.bonusWon || 0;
       const totalPayout = stake + bonus;
 
-      console.log(`   ${winner.name}:`);
-      console.log(`     - Original stake: ${MoneyUtils.formatCents(stake)}`);
-      console.log(`     - Bonus won: ${MoneyUtils.formatCents(bonus)}`);
-      console.log(
+      logAndCapture(`   ${winner.name}:`);
+      logAndCapture(`     - Original stake: ${MoneyUtils.formatCents(stake)}`);
+      logAndCapture(`     - Bonus won: ${MoneyUtils.formatCents(bonus)}`);
+      logAndCapture(
         `     - Total payout: ${MoneyUtils.formatCents(totalPayout)}`
       );
-      console.log(`     - Net profit: ${MoneyUtils.formatCents(bonus)}`);
+      logAndCapture(`     - Net profit: ${MoneyUtils.formatCents(bonus)}`);
     }
 
-    console.log(`\n💸 Players who cashed out:`);
+    logAndCapture(`\n💸 Players who cashed out:`);
     const cashedOut = finalGame.players.filter(
       (p) => p.foldedAtCheckpoint !== undefined
     );
@@ -317,21 +331,21 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
       );
       const forfeited = stake - cashoutAmount;
 
-      console.log(`   ${player.name}:`);
-      console.log(`     - Original stake: ${MoneyUtils.formatCents(stake)}`);
-      console.log(
+      logAndCapture(`   ${player.name}:`);
+      logAndCapture(`     - Original stake: ${MoneyUtils.formatCents(stake)}`);
+      logAndCapture(
         `     - Cashed out at checkpoint ${checkpoints}: ${MoneyUtils.formatCents(
           cashoutAmount
         )}`
       );
-      console.log(`     - Forfeited: ${MoneyUtils.formatCents(forfeited)}`);
-      console.log(`     - Net loss: ${MoneyUtils.formatCents(forfeited)}`);
+      logAndCapture(`     - Forfeited: ${MoneyUtils.formatCents(forfeited)}`);
+      logAndCapture(`     - Net loss: ${MoneyUtils.formatCents(forfeited)}`);
     }
 
     // ================================================================================
     // STEP 7: Verify calculations are correct
     // ================================================================================
-    console.log("\n🧮 VERIFICATION:");
+    logAndCapture("\n🧮 VERIFICATION:");
 
     // Assertions
     expect(winners.length).toBe(2); // Alice and Charlie
@@ -343,12 +357,32 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
       expect(winner.checkpointsCompleted).toBe(5);
     }
 
-    console.log("\n✅ All calculations verified! Game completed successfully.");
-    console.log(
+    logAndCapture(
+      "\n✅ All calculations verified! Game completed successfully."
+    );
+    logAndCapture(
       "🎉 Alice and Charlie burned all 1000 calories and won bonuses!"
     );
-    console.log(
+    logAndCapture(
       "💸 Bob, Diana, and Eve cashed out early but still got partial returns."
     );
+
+    // ================================================================================
+    // STEP 8: Write output to file
+    // ================================================================================
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const outputFileName = `test-output-${timestamp}.txt`;
+    const outputPath = path.join(process.cwd(), outputFileName);
+
+    const fullOutput = [
+      `Game Test Output - Generated on ${new Date().toISOString()}`,
+      `Test executed at: ${outputPath}`,
+      "".padEnd(80, "="),
+      "",
+      ...testOutput,
+    ].join("\n");
+
+    fs.writeFileSync(outputPath, fullOutput, "utf8");
+    logAndCapture(`\n📄 Test output written to: ${outputFileName}`);
   });
 });
