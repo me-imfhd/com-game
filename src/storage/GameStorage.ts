@@ -1,50 +1,83 @@
+import { cloneDeep } from "lodash";
 import type {
-  Game,
-  Player,
+  AmountCents,
   CheckIn,
+  Game,
+  GameState,
+  Player,
   Transaction,
   UUID,
 } from "../types/index.js";
-
 /**
  * In-memory storage for games using Map
  * This handles all CRUD operations for games and related entities
  */
 export class GameStorage {
   private games: Map<UUID, Game> = new Map();
+  private static instance: GameStorage;
+
+  private constructor() {}
+
+  public static getInstance(): GameStorage {
+    if (!GameStorage.instance) {
+      GameStorage.instance = new GameStorage();
+    }
+    return GameStorage.instance;
+  }
 
   // ================================================================================
   // GAME CRUD OPERATIONS
   // ================================================================================
 
-  createGame(game: Game): void {
+  createGameMut(game: Game): void {
     this.games.set(game.id, game);
   }
 
-  getGame(gameId: UUID): Game | undefined {
-    return this.games.get(gameId);
+  getGameCopy(gameId: UUID): Game | undefined {
+    const game = this.games.get(gameId);
+    if (!game) return undefined;
+    return cloneDeep(game);
   }
 
-  updateGame(gameId: UUID, updates: Partial<Game>): Game | undefined {
-    const existingGame = this.games.get(gameId);
-    if (!existingGame) return undefined;
-
-    const updatedGame = { ...existingGame, ...updates };
-    this.games.set(gameId, updatedGame);
-    return updatedGame;
+  /**
+   * Adds the amount to the total pool of the game.
+   * Panics if the game is not found.
+   */
+  addToPoolUncheckedMut(gameId: UUID, amount: AmountCents): void {
+    const gameMutable = this.games.get(gameId);
+    if (!gameMutable) throw new Error("Game not found");
+    gameMutable.totalPool += amount;
   }
 
-  deleteGame(gameId: UUID): boolean {
+  updateGameStatusUncheckedMut(gameId: UUID, status: GameState): void {
+    const gameMutable = this.games.get(gameId);
+    if (!gameMutable) throw new Error("Game not found");
+    gameMutable.state = status;
+  }
+
+  cashoutPlayerUncheckedMut(
+    gameId: UUID,
+    cashoutAmount: AmountCents,
+    forfeitedAmount: AmountCents
+  ): void {
+    const gameMutable = this.games.get(gameId);
+    if (!gameMutable) throw new Error("Game not found");
+    gameMutable.totalCashouts += cashoutAmount;
+    gameMutable.bonusPool += forfeitedAmount;
+    gameMutable.totalPool -= cashoutAmount;
+  }
+
+  deleteGameMut(gameId: UUID): boolean {
     return this.games.delete(gameId);
   }
 
-  getAllGames(): Game[] {
+  private getAllGames(): Game[] {
     return Array.from(this.games.values());
   }
 
-  getGamesByGameMaster(gameMasterId: UUID): Game[] {
-    return this.getAllGames().filter(
-      (game) => game.gameMasterId === gameMasterId
+  getGamesByGameMasterCopy(gameMasterId: UUID): Game[] {
+    return cloneDeep(
+      this.getAllGames().filter((game) => game.gameMasterId === gameMasterId)
     );
   }
 
@@ -52,128 +85,126 @@ export class GameStorage {
   // PLAYER OPERATIONS
   // ================================================================================
 
-  addPlayerToGame(gameId: UUID, player: Player): Game | undefined {
-    const game = this.games.get(gameId);
-    if (!game) return undefined;
-
-    const updatedGame = {
-      ...game,
-      players: [...game.players, player],
-    };
-    this.games.set(gameId, updatedGame);
-    return updatedGame;
+  /**
+   * Adds a player to the game.
+   * Panics if the game is not found.
+   */
+  addPlayerToGameUncheckedMut(gameId: UUID, player: Player): void {
+    const gameMutable = this.games.get(gameId);
+    if (!gameMutable) throw new Error("Game not found");
+    gameMutable.players.push(player);
   }
 
-  updatePlayer(
+  getPlayerUncheckedCopy(gameId: UUID, playerId: UUID): Player | undefined {
+    const game = this.games.get(gameId);
+    if (!game) throw new Error("Game not found");
+    return cloneDeep(game.players.find((p) => p.id === playerId));
+  }
+
+  increasePlayerProgressUncheckedMut(gameId: UUID, playerId: UUID): void {
+    const game = this.games.get(gameId);
+    if (!game) throw new Error("Game not found");
+    const player = game.players.find((p) => p.id === playerId);
+    if (!player) throw new Error("Player not found");
+
+    player.checkpointsCompleted += 1;
+  }
+
+  foldPlayerUncheckedMut(gameId: UUID, playerId: UUID): void {
+    const game = this.games.get(gameId);
+    if (!game) throw new Error("Game not found");
+    const player = game.players.find((p) => p.id === playerId);
+    if (!player) throw new Error("Player not found");
+    player.foldedAtCheckpoint = player.checkpointsCompleted;
+  }
+
+  addPlayerBonusUncheckedMut(
     gameId: UUID,
     playerId: UUID,
-    updates: Partial<Player>
-  ): Game | undefined {
-    const game = this.games.get(gameId);
-    if (!game) return undefined;
-
-    const playerIndex = game.players.findIndex((p) => p.id === playerId);
-    if (playerIndex === -1) return undefined;
-
-    const updatedPlayers = [...game.players];
-    updatedPlayers[playerIndex] = {
-      ...updatedPlayers[playerIndex],
-      ...updates,
-    };
-
-    const updatedGame = {
-      ...game,
-      players: updatedPlayers,
-    };
-    this.games.set(gameId, updatedGame);
-    return updatedGame;
-  }
-
-  getPlayer(gameId: UUID, playerId: UUID): Player | undefined {
-    const game = this.games.get(gameId);
-    if (!game) return undefined;
-    return game.players.find((p) => p.id === playerId);
+    bonus: AmountCents
+  ): void {
+    const gameMutable = this.games.get(gameId);
+    if (!gameMutable) throw new Error("Game not found");
+    const player = gameMutable.players.find((p) => p.id === playerId);
+    if (!player) throw new Error("Player not found");
+    player.bonusWon = bonus;
   }
 
   // ================================================================================
   // CHECK-IN OPERATIONS
   // ================================================================================
 
-  addCheckIn(gameId: UUID, checkIn: CheckIn): Game | undefined {
+  addCheckInUncheckedMut(gameId: UUID, checkIn: CheckIn): void {
     const game = this.games.get(gameId);
-    if (!game) return undefined;
-
-    const updatedGame = {
-      ...game,
-      checkIns: [...game.checkIns, checkIn],
-    };
-    this.games.set(gameId, updatedGame);
-    return updatedGame;
+    if (!game) throw new Error("Game not found");
+    game.checkIns.push(checkIn);
   }
 
-  updateCheckIn(
+  approveCheckInUncheckedMut(
     gameId: UUID,
     checkInId: UUID,
-    updates: Partial<CheckIn>
-  ): Game | undefined {
+    notes?: string
+  ): void {
     const game = this.games.get(gameId);
-    if (!game) return undefined;
+    if (!game) throw new Error("Game not found");
 
     const checkInIndex = game.checkIns.findIndex((c) => c.id === checkInId);
-    if (checkInIndex === -1) return undefined;
+    if (checkInIndex === -1) throw new Error("Check-in not found");
 
-    const updatedCheckIns = [...game.checkIns];
-    updatedCheckIns[checkInIndex] = {
-      ...updatedCheckIns[checkInIndex],
-      ...updates,
-    };
-
-    const updatedGame = {
-      ...game,
-      checkIns: updatedCheckIns,
-    };
-    this.games.set(gameId, updatedGame);
-    return updatedGame;
+    const checkIn = game.checkIns[checkInIndex];
+    checkIn.verifiedAt = new Date();
+    checkIn.notes = notes;
+    checkIn.status = "APPROVED";
   }
 
-  getCheckIn(gameId: UUID, checkInId: UUID): CheckIn | undefined {
+  rejectCheckInUncheckedMut(
+    gameId: UUID,
+    checkInId: UUID,
+    notes?: string
+  ): void {
     const game = this.games.get(gameId);
-    if (!game) return undefined;
-    return game.checkIns.find((c) => c.id === checkInId);
+    if (!game) throw new Error("Game not found");
+
+    const checkInIndex = game.checkIns.findIndex((c) => c.id === checkInId);
+    if (checkInIndex === -1) throw new Error("Check-in not found");
+
+    const checkIn = game.checkIns[checkInIndex];
+    checkIn.status = "REJECTED";
+    checkIn.notes = notes;
   }
 
-  getPlayerCheckIns(gameId: UUID, playerId: UUID): CheckIn[] {
+  getCheckInUncheckedCopy(gameId: UUID, checkInId: UUID): CheckIn | undefined {
+    const game = this.games.get(gameId);
+    if (!game) throw new Error("Game not found");
+    return cloneDeep(game.checkIns.find((c) => c.id === checkInId));
+  }
+
+  getPlayerCheckInsCopy(gameId: UUID, playerId: UUID): CheckIn[] {
     const game = this.games.get(gameId);
     if (!game) return [];
-    return game.checkIns.filter((c) => c.playerId === playerId);
+    return cloneDeep(game.checkIns.filter((c) => c.playerId === playerId));
   }
 
   // ================================================================================
   // TRANSACTION OPERATIONS
   // ================================================================================
 
-  addTransaction(gameId: UUID, transaction: Transaction): Game | undefined {
-    const game = this.games.get(gameId);
-    if (!game) return undefined;
-
-    const updatedGame = {
-      ...game,
-      transactions: [...game.transactions, transaction],
-    };
-    this.games.set(gameId, updatedGame);
-    return updatedGame;
+  addTransactionUncheckedMut(gameId: UUID, transaction: Transaction): void {
+    const gameMutable = this.games.get(gameId);
+    if (!gameMutable) throw new Error("Game not found");
+    gameMutable.transactions.push(transaction);
   }
 
-  getGameTransactions(gameId: UUID): Transaction[] {
+  getGameTransactionsCopy(gameId: UUID): Transaction[] {
     const game = this.games.get(gameId);
     if (!game) return [];
-    return game.transactions;
+    return cloneDeep(game.transactions);
   }
 
-  getPlayerTransactions(gameId: UUID, playerId: UUID): Transaction[] {
+  getPlayerTransactionsCopy(gameId: UUID, playerId: UUID): Transaction[] {
     const game = this.games.get(gameId);
     if (!game) return [];
-    return game.transactions.filter((t) => t.playerId === playerId);
+    return cloneDeep(game.transactions.filter((t) => t.playerId === playerId));
   }
 
   // ================================================================================
@@ -194,4 +225,4 @@ export class GameStorage {
 }
 
 // Singleton instance for the application
-export const gameStorage = new GameStorage();
+export const gameStorage = GameStorage.getInstance();

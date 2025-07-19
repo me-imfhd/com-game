@@ -1,37 +1,52 @@
-import { Result, ok, err } from "neverthrow";
+import { Result, err, ok } from "neverthrow";
 import { v4 as uuidv4 } from "uuid";
+import { gameStorage } from "../storage/GameStorage.js";
 import type {
-  Game,
-  Player,
+  CashoutInput,
   CheckIn,
+  CreateGameInput,
+  EndGameInput,
+  Game,
+  JoinGameInput,
+  Player,
+  StartGameInput,
+  SubmitCheckInInput,
   Transaction,
   UUID,
-  GameState,
-  AmountCents,
-  CreateGameInput,
-  JoinGameInput,
-  SubmitCheckInInput,
   VerifyCheckInInput,
-  CashoutInput,
-  StartGameInput,
-  EndGameInput,
 } from "../types/index.js";
-import { CreateGameSchema, MoneyUtils } from "../types/index.js";
-import { gameStorage } from "../storage/GameStorage.js";
+import {
+  CreateGameSchema,
+  JoinGameSchema,
+  MoneyUtils,
+  StartGameSchema,
+  SubmitCheckInSchema,
+  VerifyCheckInSchema,
+} from "../types/index.js";
 import {
   GameError,
-  PlayerError,
-  PaymentError,
-  ValidationError,
   GameErrors,
+  PaymentError,
+  PlayerError,
   PlayerErrors,
-  PaymentErrors,
+  ValidationError,
 } from "../utils/errors.js";
 
 /**
  * Game Service - Handles all game business logic with Result pattern
  */
 export class GameService {
+  private static instance: GameService;
+
+  private constructor() {}
+
+  public static getInstance(): GameService {
+    if (!GameService.instance) {
+      GameService.instance = new GameService();
+    }
+    return GameService.instance;
+  }
+
   // ================================================================================
   // GAME LIFECYCLE OPERATIONS
   // ================================================================================
@@ -43,16 +58,26 @@ export class GameService {
     input: CreateGameInput
   ): Result<Game, GameError | ValidationError> {
     try {
-      let inputParsed = CreateGameSchema.safeParse(input);
+      const inputParsed = CreateGameSchema.safeParse(input);
       if (!inputParsed.success) {
         return err(new ValidationError(inputParsed.error.message));
       }
       input = inputParsed.data;
       const gameId = uuidv4() as UUID;
-      const now = new Date();
-      const endDate = new Date(
-        now.getTime() + input.duration * 24 * 60 * 60 * 1000
-      );
+
+      // length of checkpointDescriptions should be equal to totalCheckpoints
+      if (input.checkpointDescriptions.length !== input.totalCheckpoints) {
+        return err(
+          new ValidationError(
+            "Checkpoint descriptions must match total checkpoints"
+          )
+        );
+      }
+
+      // Validate that end date is after start date
+      if (input.endDate <= input.startDate) {
+        return err(new ValidationError("End date must be after start date"));
+      }
 
       const game: Game = {
         id: gameId,
@@ -64,8 +89,8 @@ export class GameService {
         maxMultiplier: input.maxMultiplier,
         maxPlayers: input.maxPlayers,
         minPlayers: input.minPlayers,
-        startDate: now,
-        endDate: endDate,
+        startDate: input.startDate,
+        endDate: input.endDate,
         totalCheckpoints: input.totalCheckpoints,
         checkpointDescriptions: input.checkpointDescriptions,
         state: "WAITING_FOR_PLAYERS",
@@ -75,10 +100,9 @@ export class GameService {
         totalPool: 0,
         totalCashouts: 0,
         bonusPool: 0,
-        createdAt: now,
       };
 
-      gameStorage.createGame(game);
+      gameStorage.createGameMut(game);
       return ok(game);
     } catch (error) {
       return err(new GameError(`Failed to create game: ${error}`));
@@ -92,28 +116,40 @@ export class GameService {
     gameId: UUID,
     input: JoinGameInput
   ): Result<Game, GameError | PlayerError> {
-    const game = gameStorage.getGame(gameId);
-    if (!game) {
+    const inputParsed = JoinGameSchema.safeParse(input);
+    if (!inputParsed.success) {
+      return err(new ValidationError(inputParsed.error.message));
+    }
+    input = inputParsed.data;
+
+    const gameCopy = gameStorage.getGameCopy(gameId);
+    if (!gameCopy) {
       return err(GameErrors.GAME_NOT_FOUND(gameId));
     }
 
-    if (game.state !== "WAITING_FOR_PLAYERS") {
+    if (gameCopy.state !== "WAITING_FOR_PLAYERS") {
       return err(GameErrors.GAME_ALREADY_STARTED(gameId));
     }
 
-    if (game.players.length >= game.maxPlayers) {
+    if (gameCopy.players.length >= gameCopy.maxPlayers) {
       return err(
-        GameErrors.TOO_MANY_PLAYERS(game.players.length, game.maxPlayers)
+        GameErrors.TOO_MANY_PLAYERS(
+          gameCopy.players.length,
+          gameCopy.maxPlayers
+        )
       );
     }
 
-    if (game.players.some((p) => p.id === input.playerId)) {
+    if (gameCopy.players.some((p) => p.id === input.playerId)) {
       return err(PlayerErrors.PLAYER_ALREADY_JOINED(input.playerId));
     }
 
-    if (input.multiplier > game.maxMultiplier) {
+    if (input.multiplier > gameCopy.maxMultiplier) {
       return err(
-        PlayerErrors.INVALID_MULTIPLIER(input.multiplier, game.maxMultiplier)
+        PlayerErrors.INVALID_MULTIPLIER(
+          input.multiplier,
+          gameCopy.maxMultiplier
+        )
       );
     }
 
@@ -125,68 +161,88 @@ export class GameService {
       checkpointsCompleted: 0,
     };
 
-    const stake = game.stackSize * input.multiplier;
+    const stake = gameCopy.stackSize * input.multiplier;
 
     // Create initial stake transaction
     const transaction: Transaction = {
       id: uuidv4() as UUID,
       playerId: input.playerId,
-      gameId: gameId,
+      gameId: gameCopy.id,
       type: "INITIAL_STAKE",
       amount: stake,
       timestamp: new Date(),
-      description: `Initial stake: ${MoneyUtils.formatCents(stake)}`,
+      description: `Initial stake of ${MoneyUtils.formatCents(stake)} by ${
+        input.playerName
+      }`,
     };
 
-    const updatedGame = gameStorage.addPlayerToGame(gameId, player);
-    if (!updatedGame) {
-      return err(GameErrors.GAME_NOT_FOUND(gameId));
+    // 1. Add player to game
+    gameStorage.addPlayerToGameUncheckedMut(gameCopy.id, player);
+
+    // 2. Add transaction to game
+    gameStorage.addTransactionUncheckedMut(gameCopy.id, transaction);
+
+    // 3. Update total pool
+    gameStorage.addToPoolUncheckedMut(gameCopy.id, stake);
+
+    // 4. Return the game copy
+    const game = gameStorage.getGameCopy(gameCopy.id);
+    if (!game) {
+      throw new Error("Game not found, this should never happen");
     }
-
-    gameStorage.addTransaction(gameId, transaction);
-
-    // Update total pool
-    gameStorage.updateGame(gameId, {
-      totalPool: updatedGame.totalPool + stake,
-    });
-
-    const finalGame = gameStorage.getGame(gameId)!;
-    return ok(finalGame);
+    return ok(game);
   }
 
   /**
-   * Start a game (only game master can do this)
+   * Start a game (auto-starts when startTime is reached and has enough players)
    */
   startGame(input: StartGameInput): Result<Game, GameError> {
-    const game = gameStorage.getGame(input.gameId);
-    if (!game) {
+    const inputParsed = StartGameSchema.safeParse(input);
+    if (!inputParsed.success) {
+      return err(new ValidationError(inputParsed.error.message));
+    }
+    input = inputParsed.data;
+
+    const gameCopy = gameStorage.getGameCopy(input.gameId);
+    if (!gameCopy) {
       return err(GameErrors.GAME_NOT_FOUND(input.gameId));
     }
 
-    if (game.gameMasterId !== input.gameMasterId) {
+    if (gameCopy.gameMasterId !== input.gameMasterId) {
       return err(GameErrors.UNAUTHORIZED_GAME_MASTER(input.gameMasterId));
     }
 
-    if (game.state !== "WAITING_FOR_PLAYERS") {
+    if (gameCopy.state !== "WAITING_FOR_PLAYERS") {
       return err(GameErrors.GAME_ALREADY_STARTED(input.gameId));
     }
 
-    if (game.players.length < game.minPlayers) {
+    const now = new Date();
+    const oneHourAfterStart = new Date(
+      gameCopy.startDate.getTime() + 60 * 60 * 1000
+    );
+
+    if (gameCopy.startDate > now || now > oneHourAfterStart) {
       return err(
-        GameErrors.NOT_ENOUGH_PLAYERS(game.players.length, game.minPlayers)
+        GameErrors.INVALID_START_TIME(input.gameId, now, gameCopy.startDate)
       );
     }
 
-    const updatedGame = gameStorage.updateGame(input.gameId, {
-      state: "IN_PROGRESS" as GameState,
-      startedAt: new Date(),
-    });
-
-    if (!updatedGame) {
-      return err(GameErrors.GAME_NOT_FOUND(input.gameId));
+    if (gameCopy.players.length < gameCopy.minPlayers) {
+      return err(
+        GameErrors.NOT_ENOUGH_PLAYERS(
+          gameCopy.players.length,
+          gameCopy.minPlayers
+        )
+      );
     }
 
-    return ok(updatedGame);
+    gameStorage.updateGameStatusUncheckedMut(input.gameId, "IN_PROGRESS");
+    //  Return the game copy
+    const game = gameStorage.getGameCopy(input.gameId);
+    if (!game) {
+      throw new Error("Game not found, this should never happen");
+    }
+    return ok(game);
   }
 
   // ================================================================================
@@ -200,7 +256,13 @@ export class GameService {
     gameId: UUID,
     input: SubmitCheckInInput
   ): Result<CheckIn, GameError | PlayerError> {
-    const game = gameStorage.getGame(gameId);
+    const inputParsed = SubmitCheckInSchema.safeParse(input);
+    if (!inputParsed.success) {
+      return err(new ValidationError(inputParsed.error.message));
+    }
+    input = inputParsed.data;
+
+    const game = gameStorage.getGameCopy(gameId);
     if (!game) {
       return err(GameErrors.GAME_NOT_FOUND(gameId));
     }
@@ -209,7 +271,7 @@ export class GameService {
       return err(GameErrors.GAME_NOT_STARTED(gameId));
     }
 
-    const player = gameStorage.getPlayer(gameId, input.playerId);
+    const player = gameStorage.getPlayerUncheckedCopy(gameId, input.playerId);
     if (!player) {
       return err(PlayerErrors.PLAYER_NOT_IN_GAME(input.playerId));
     }
@@ -227,7 +289,31 @@ export class GameService {
       );
     }
 
-    if (input.checkpointNumber <= player.checkpointsCompleted) {
+    const playersCheckIns = gameStorage.getPlayerCheckInsCopy(
+      gameId,
+      input.playerId
+    );
+
+    // Only add if checkpoint is rejected or not pending or not approved
+    if (
+      playersCheckIns.some(
+        (c) =>
+          c.checkpointNumber === input.checkpointNumber &&
+          c.status === "PENDING"
+      )
+    ) {
+      return err(
+        PlayerErrors.CHECKPOINT_ALREADY_PENDING(input.checkpointNumber)
+      );
+    }
+
+    if (
+      playersCheckIns.some(
+        (c) =>
+          c.checkpointNumber === input.checkpointNumber &&
+          c.status === "APPROVED"
+      )
+    ) {
       return err(
         PlayerErrors.CHECKPOINT_ALREADY_COMPLETED(input.checkpointNumber)
       );
@@ -236,15 +322,22 @@ export class GameService {
     const checkIn: CheckIn = {
       id: uuidv4() as UUID,
       playerId: input.playerId,
-      gameId: gameId,
+      gameId,
       checkpointNumber: input.checkpointNumber,
-      submissionData: input.submissionData,
+      media: input.media,
       submittedAt: new Date(),
       status: "PENDING",
     };
 
-    gameStorage.addCheckIn(gameId, checkIn);
-    return ok(checkIn);
+    // 1. Add check-in to game
+    gameStorage.addCheckInUncheckedMut(gameId, checkIn);
+
+    // 2. Return the check-in
+    const checkInCopy = gameStorage.getCheckInUncheckedCopy(gameId, checkIn.id);
+    if (!checkInCopy) {
+      throw new Error("Check-in not found, this should never happen");
+    }
+    return ok(checkInCopy);
   }
 
   /**
@@ -254,40 +347,86 @@ export class GameService {
     gameId: UUID,
     input: VerifyCheckInInput
   ): Result<CheckIn, GameError | PlayerError> {
-    const checkIn = gameStorage.getCheckIn(gameId, input.checkInId);
-    if (!checkIn) {
-      return err(new GameError(`CheckIn ${input.checkInId} not found`));
+    const inputParsed = VerifyCheckInSchema.safeParse(input);
+    if (!inputParsed.success) {
+      return err(new ValidationError(inputParsed.error.message));
     }
+    input = inputParsed.data;
 
-    if (checkIn.status !== "PENDING") {
-      return err(
-        new GameError(`CheckIn ${input.checkInId} has already been processed`)
-      );
-    }
-
-    const updatedCheckIn = gameStorage.updateCheckIn(gameId, input.checkInId, {
-      status: input.status,
-      verifiedAt: new Date(),
-      notes: input.notes,
-    });
-
-    if (!updatedCheckIn) {
+    const gameCopy = gameStorage.getGameCopy(gameId);
+    if (!gameCopy) {
       return err(GameErrors.GAME_NOT_FOUND(gameId));
     }
 
-    // If approved, update player's checkpoint progress
-    if (input.status === "APPROVED") {
-      const result = this.updatePlayerProgress(
-        gameId,
-        checkIn.playerId,
-        checkIn.checkpointNumber
-      );
-      if (result.isErr()) {
-        return err(result.error);
-      }
+    const checkIn = gameStorage.getCheckInUncheckedCopy(
+      gameId,
+      input.checkInId
+    );
+
+    if (!checkIn) {
+      return err(GameErrors.CHECK_IN_NOT_FOUND(input.checkInId));
     }
 
-    const finalCheckIn = gameStorage.getCheckIn(gameId, input.checkInId)!;
+    if (gameCopy.gameMasterId !== input.gameMasterId) {
+      return err(GameErrors.UNAUTHORIZED_GAME_MASTER(input.gameMasterId));
+    }
+
+    if (gameCopy.state === "ENDED") {
+      return err(GameErrors.GAME_ALREADY_ENDED(gameId));
+    }
+
+    if (gameCopy.state === "WAITING_FOR_PLAYERS") {
+      return err(GameErrors.GAME_NOT_STARTED(gameId));
+    }
+
+    if (checkIn.status === "APPROVED") {
+      return err(GameErrors.CHECK_IN_ALREADY_APPROVED(input.checkInId));
+    }
+
+    if (checkIn.status === "REJECTED") {
+      return err(GameErrors.CHECK_IN_REJECTED(input.checkInId));
+    }
+
+    const player = gameStorage.getPlayerUncheckedCopy(gameId, checkIn.playerId);
+    if (!player) {
+      return err(PlayerErrors.PLAYER_NOT_IN_GAME(checkIn.playerId));
+    }
+
+    if (player.foldedAtCheckpoint !== undefined) {
+      return err(PlayerErrors.PLAYER_ALREADY_FOLDED(checkIn.playerId));
+    }
+
+    switch (input.status) {
+      case "APPROVED":
+        gameStorage.approveCheckInUncheckedMut(
+          gameId,
+          input.checkInId,
+          input.notes
+        );
+
+        // player exists and is not folded
+        gameStorage.increasePlayerProgressUncheckedMut(
+          gameId,
+          checkIn.playerId
+        );
+        break;
+
+      case "REJECTED":
+        gameStorage.rejectCheckInUncheckedMut(
+          gameId,
+          input.checkInId,
+          input.notes
+        );
+        break;
+    }
+
+    const finalCheckIn = gameStorage.getCheckInUncheckedCopy(
+      gameId,
+      input.checkInId
+    );
+    if (!finalCheckIn) {
+      throw new Error("Check-in not found, this should never happen");
+    }
     return ok(finalCheckIn);
   }
 
@@ -298,7 +437,7 @@ export class GameService {
     gameId: UUID,
     input: CashoutInput
   ): Result<Transaction, GameError | PlayerError | PaymentError> {
-    const game = gameStorage.getGame(gameId);
+    const game = gameStorage.getGameCopy(gameId);
     if (!game) {
       return err(GameErrors.GAME_NOT_FOUND(gameId));
     }
@@ -307,7 +446,7 @@ export class GameService {
       return err(GameErrors.GAME_NOT_STARTED(gameId));
     }
 
-    const player = gameStorage.getPlayer(gameId, input.playerId);
+    const player = gameStorage.getPlayerUncheckedCopy(gameId, input.playerId);
     if (!player) {
       return err(PlayerErrors.PLAYER_NOT_IN_GAME(input.playerId));
     }
@@ -316,19 +455,10 @@ export class GameService {
       return err(PlayerErrors.PLAYER_ALREADY_FOLDED(input.playerId));
     }
 
-    if (input.checkpointNumber > player.checkpointsCompleted) {
-      return err(
-        PlayerErrors.INSUFFICIENT_CHECKPOINTS(
-          player.checkpointsCompleted,
-          input.checkpointNumber
-        )
-      );
-    }
-
     // Calculate cashout amount
     const stake = game.stackSize * player.multiplier;
     const cashoutAmount = Math.floor(
-      (stake / game.totalCheckpoints) * input.checkpointNumber
+      (stake * player.checkpointsCompleted) / game.totalCheckpoints
     );
     const forfeitedAmount = stake - cashoutAmount;
 
@@ -336,30 +466,99 @@ export class GameService {
     const transaction: Transaction = {
       id: uuidv4() as UUID,
       playerId: input.playerId,
-      gameId: gameId,
+      gameId,
       type: "CASHOUT",
       amount: cashoutAmount,
       timestamp: new Date(),
-      description: `Cashout at checkpoint ${
-        input.checkpointNumber
-      }: ${MoneyUtils.formatCents(cashoutAmount)}`,
+      description: `Cashout at checkpoint ${player.checkpointsCompleted} of ${
+        game.totalCheckpoints
+      }: ${MoneyUtils.formatCents(cashoutAmount)} for ${player.name}`,
     };
 
-    // Update player as folded
-    gameStorage.updatePlayer(gameId, input.playerId, {
-      foldedAtCheckpoint: input.checkpointNumber,
-    });
+    // Update player as folded // player exists and is not folded
+    gameStorage.foldPlayerUncheckedMut(gameId, input.playerId);
 
     // Add transaction
-    gameStorage.addTransaction(gameId, transaction);
+    gameStorage.addTransactionUncheckedMut(gameId, transaction);
 
     // Update game financial tracking
-    gameStorage.updateGame(gameId, {
-      totalCashouts: game.totalCashouts + cashoutAmount,
-      bonusPool: game.bonusPool + forfeitedAmount,
-    });
+    gameStorage.cashoutPlayerUncheckedMut(
+      gameId,
+      cashoutAmount,
+      forfeitedAmount
+    );
 
     return ok(transaction);
+  }
+
+  // ================================================================================
+  // READ OPERATIONS
+  // ================================================================================
+
+  /**
+   * Get a game by ID
+   */
+  getGame(gameId: UUID): Result<Game, GameError> {
+    const game = gameStorage.getGameCopy(gameId);
+    if (!game) {
+      return err(GameErrors.GAME_NOT_FOUND(gameId));
+    }
+    return ok(game);
+  }
+
+  /**
+   * Get all games for a game master
+   */
+  getGamesByGameMaster(gameMasterId: UUID): Game[] {
+    return gameStorage.getGamesByGameMasterCopy(gameMasterId);
+  }
+
+  /**
+   * Get check-ins for a specific player in a game
+   */
+  getPlayerCheckIns(
+    gameId: UUID,
+    playerId: UUID
+  ): Result<CheckIn[], GameError> {
+    const game = gameStorage.getGameCopy(gameId);
+    if (!game) {
+      return err(GameErrors.GAME_NOT_FOUND(gameId));
+    }
+
+    const checkIns = gameStorage.getPlayerCheckInsCopy(gameId, playerId);
+    return ok(checkIns);
+  }
+
+  /**
+   * Get all transactions for a game
+   */
+  getGameTransactions(gameId: UUID): Result<Transaction[], GameError> {
+    const game = gameStorage.getGameCopy(gameId);
+    if (!game) {
+      return err(GameErrors.GAME_NOT_FOUND(gameId));
+    }
+
+    const transactions = gameStorage.getGameTransactionsCopy(gameId);
+    return ok(transactions);
+  }
+
+  /**
+   * Get transactions for a specific player in a game
+   */
+  getPlayerTransactions(
+    gameId: UUID,
+    playerId: UUID
+  ): Result<Transaction[], GameError> {
+    const game = gameStorage.getGameCopy(gameId);
+    if (!game) {
+      return err(GameErrors.GAME_NOT_FOUND(gameId));
+    }
+
+    const transactions = gameStorage.getPlayerTransactionsCopy(
+      gameId,
+      playerId
+    );
+    return ok(transactions);
   }
 
   // ================================================================================
@@ -370,7 +569,7 @@ export class GameService {
    * End the game and distribute bonuses
    */
   endGame(input: EndGameInput): Result<Game, GameError> {
-    const game = gameStorage.getGame(input.gameId);
+    const game = gameStorage.getGameCopy(input.gameId);
     if (!game) {
       return err(GameErrors.GAME_NOT_FOUND(input.gameId));
     }
@@ -383,9 +582,27 @@ export class GameService {
       return err(GameErrors.GAME_ALREADY_ENDED(input.gameId));
     }
 
+    if (game.state === "WAITING_FOR_PLAYERS") {
+      return err(GameErrors.GAME_NOT_STARTED(input.gameId));
+    }
+
     // Calculate and distribute bonuses to winners
+    const nonCashedOutPlayers = game.players.filter(
+      (p) =>
+        p.foldedAtCheckpoint === undefined &&
+        p.checkpointsCompleted !== game.totalCheckpoints
+    );
+
+    for (const player of nonCashedOutPlayers) {
+      this.cashOut(game.id, {
+        playerId: player.id,
+      });
+    }
+
     const winners = game.players.filter(
-      (p) => p.foldedAtCheckpoint === undefined
+      (p) =>
+        p.foldedAtCheckpoint === undefined &&
+        p.checkpointsCompleted === game.totalCheckpoints
     );
 
     if (winners.length > 0 && game.bonusPool > 0) {
@@ -397,13 +614,15 @@ export class GameService {
       for (const winner of winners) {
         const winnerStake = game.stackSize * winner.multiplier;
         const bonusShare = Math.floor(
-          (winnerStake / totalWinnerStakes) * game.bonusPool
+          (winnerStake * game.bonusPool) / totalWinnerStakes
         );
 
-        // Update player with bonus
-        gameStorage.updatePlayer(input.gameId, winner.id, {
-          bonusWon: bonusShare,
-        });
+        // Update player with bonus // player exists and is not folded
+        gameStorage.addPlayerBonusUncheckedMut(
+          input.gameId,
+          winner.id,
+          bonusShare
+        );
 
         // Create payout transaction
         const payoutTransaction: Transaction = {
@@ -418,68 +637,20 @@ export class GameService {
           )} stake + ${MoneyUtils.formatCents(bonusShare)} bonus`,
         };
 
-        gameStorage.addTransaction(input.gameId, payoutTransaction);
+        gameStorage.addTransactionUncheckedMut(input.gameId, payoutTransaction);
       }
     }
 
     // Mark game as ended
-    const updatedGame = gameStorage.updateGame(input.gameId, {
-      state: "ENDED" as GameState,
-      endedAt: new Date(),
-    });
+    gameStorage.updateGameStatusUncheckedMut(input.gameId, "ENDED");
 
-    if (!updatedGame) {
-      return err(GameErrors.GAME_NOT_FOUND(input.gameId));
+    const gameCopy = gameStorage.getGameCopy(input.gameId);
+    if (!gameCopy) {
+      throw new Error("Game not found, this should never happen");
     }
-
-    return ok(updatedGame);
-  }
-
-  // ================================================================================
-  // UTILITY METHODS
-  // ================================================================================
-
-  private updatePlayerProgress(
-    gameId: UUID,
-    playerId: UUID,
-    checkpointNumber: number
-  ): Result<Player, PlayerError> {
-    const player = gameStorage.getPlayer(gameId, playerId);
-    if (!player) {
-      return err(PlayerErrors.PLAYER_NOT_IN_GAME(playerId));
-    }
-
-    const updatedGame = gameStorage.updatePlayer(gameId, playerId, {
-      checkpointsCompleted: checkpointNumber,
-    });
-
-    if (!updatedGame) {
-      return err(PlayerErrors.PLAYER_NOT_FOUND(playerId));
-    }
-
-    const updatedPlayer = gameStorage.getPlayer(gameId, playerId)!;
-    return ok(updatedPlayer);
-  }
-
-  /**
-   * Get game by ID
-   */
-  getGame(gameId: UUID): Result<Game, GameError> {
-    const game = gameStorage.getGame(gameId);
-    if (!game) {
-      return err(GameErrors.GAME_NOT_FOUND(gameId));
-    }
-    return ok(game);
-  }
-
-  /**
-   * Get all games by game master
-   */
-  getGamesByGameMaster(gameMasterId: UUID): Result<Game[], never> {
-    const games = gameStorage.getGamesByGameMaster(gameMasterId);
-    return ok(games);
+    return ok(gameCopy);
   }
 }
 
 // Singleton instance
-export const gameService = new GameService();
+export const gameService = GameService.getInstance();

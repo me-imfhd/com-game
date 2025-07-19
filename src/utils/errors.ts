@@ -1,12 +1,53 @@
+export type ErrorResponse = {
+  status: string;
+  statusCode: number;
+  message: string;
+  timestamp: string;
+};
+
 export class AppError extends Error {
-  constructor(
-    public statusCode: number,
-    public status: string,
-    message: string
-  ) {
+  public statusCode: number;
+  public status: string;
+
+  constructor(statusCode: number, status: string, message: string) {
     super(message);
+    this.statusCode = statusCode;
+    this.status = status;
     this.name = this.constructor.name;
     Error.captureStackTrace(this, this.constructor);
+  }
+
+  /**
+   * Returns a formatted error response object for API responses
+   */
+  toErrorResponse(): ErrorResponse {
+    return {
+      status: this.status,
+      statusCode: this.statusCode,
+      message: this.message,
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * Returns true if this is a client error (4xx)
+   */
+  isClientError(): boolean {
+    return this.statusCode >= 400 && this.statusCode < 500;
+  }
+
+  /**
+   * Returns true if this is a server error (5xx)
+   */
+  isServerError(): boolean {
+    return this.statusCode >= 500;
+  }
+
+  /**
+   * Returns a formatted string representation including status info
+   */
+  toString(): string {
+    return `${this.statusCode} ${this.status}: ${this.message}`;
   }
 }
 
@@ -57,6 +98,10 @@ export class PaymentError extends Error {
 // Specific game error types
 export const GameErrors = {
   GAME_NOT_FOUND: (gameId: string) => new GameError(`Game ${gameId} not found`),
+  INVALID_START_TIME: (gameId: string, now: Date, startDate: Date) =>
+    new GameError(
+      `Game ${gameId} start time is invalid: now=${now.toISOString()} startDate=${startDate.toISOString()}`
+    ),
   GAME_ALREADY_STARTED: (gameId: string) =>
     new GameError(`Game ${gameId} has already started`),
   GAME_ALREADY_ENDED: (gameId: string) =>
@@ -69,6 +114,14 @@ export const GameErrors = {
     new GameError(`Too many players: ${current}/${max}`),
   UNAUTHORIZED_GAME_MASTER: (gameMasterId: string) =>
     new GameError(`User ${gameMasterId} is not the game master`),
+  CHECK_IN_NOT_FOUND: (checkInId: string) =>
+    new GameError(`Check-in ${checkInId} not found`),
+  CHECK_IN_ALREADY_PROCESSED: (checkInId: string) =>
+    new GameError(`Check-in ${checkInId} has already been processed`),
+  CHECK_IN_ALREADY_APPROVED: (checkInId: string) =>
+    new GameError(`Check-in ${checkInId} is already approved`),
+  CHECK_IN_REJECTED: (checkInId: string) =>
+    new GameError(`Check-in ${checkInId} has been rejected`),
 } as const;
 
 export const PlayerErrors = {
@@ -88,6 +141,8 @@ export const PlayerErrors = {
     ),
   CHECKPOINT_ALREADY_COMPLETED: (checkpoint: number) =>
     new PlayerError(`Checkpoint ${checkpoint} already completed`),
+  CHECKPOINT_ALREADY_PENDING: (checkpoint: number) =>
+    new PlayerError(`Checkpoint ${checkpoint} already pending`),
   INSUFFICIENT_CHECKPOINTS: (completed: number, required: number) =>
     new PlayerError(
       `Insufficient checkpoints completed: ${completed}/${required}`

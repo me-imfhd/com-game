@@ -1,12 +1,12 @@
-import express from "express";
+import cors from "cors";
 import type {
   Application,
+  ErrorRequestHandler,
+  NextFunction,
   Request,
   Response,
-  NextFunction,
-  ErrorRequestHandler,
 } from "express";
-import cors from "cors";
+import express from "express";
 import helmet from "helmet";
 import { config, type Config } from "./config";
 import { AppError } from "./utils/errors";
@@ -59,7 +59,7 @@ export class Server {
       err: Error,
       req: Request,
       res: Response,
-      next: NextFunction
+      _next: NextFunction
     ) => {
       console.error(err);
       // Log relevant request details with including what it is
@@ -71,18 +71,15 @@ export class Server {
       console.log("Headers:", req.headers);
 
       if (err instanceof AppError) {
-        res.status(err.statusCode).json({
-          status: err.status,
-          message: err.message,
-        });
+        res.status(err.statusCode).json(err.toErrorResponse());
         return;
       }
 
-      res.status(500).json({
-        status: "error",
-        message: "Internal server error",
-        details: err.message,
-      });
+      res
+        .status(500)
+        .json(
+          new AppError(500, "error", "Internal server error").toErrorResponse()
+        );
     };
 
     this.app.use(errorHandler);

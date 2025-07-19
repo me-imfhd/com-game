@@ -27,6 +27,7 @@ export type GameType = z.infer<typeof GameTypeSchema>;
 export type GameState = z.infer<typeof GameStateSchema>;
 export type CheckInStatus = z.infer<typeof CheckInStatusSchema>;
 export type UUID = z.infer<typeof UUIDSchema>;
+export type Media = z.infer<typeof MediaSchema>;
 
 // ================================================================================
 // MONETARY TYPES - All amounts stored as cents (integers) to avoid floating point issues
@@ -66,7 +67,8 @@ export interface CheckIn {
   playerId: UUID;
   gameId: UUID;
   checkpointNumber: number; // Which checkpoint this is for
-  submissionData: string; // Form data/proof submitted by player
+  // Media
+  media: Media[];
   submittedAt: Date;
   status: CheckInStatus;
   verifiedAt?: Date;
@@ -96,7 +98,7 @@ export interface Player {
   foldedAtCheckpoint?: number; // undefined if not folded // gives amount forfeited to bonus pool = stake - redeemed (redeemed = Math.floor(stake / totalCheckpoints) * checkpointsCompleted)
 
   // Set only when the game ends, derived from forfeited stakes of folded players
-  bonusWon?: AmountCents; // undefined if folded // calculated as [bonusWonⱼ = (stakeⱼ / totalWinningStake) × bonusPool] where totalWinningStake = sum of stakes of all players who completed the game
+  bonusWon?: AmountCents; // calculated as [bonusWonⱼ = (stakeⱼ / totalWinningStake) × bonusPool] where totalWinningStake = sum of stakes of all players who completed the game
 
   // Player metadata
   joinedAt: Date;
@@ -104,25 +106,25 @@ export interface Player {
 }
 
 export interface Game {
-  id: UUID;
-  gameMasterId: UUID;
-  title: string;
-  description?: string;
+  readonly id: UUID;
+  readonly gameMasterId: UUID;
+  readonly title: string;
+  readonly description?: string;
 
   // Game Configuration
-  gameType: GameType;
-  stackSize: AmountCents; // Base stake amount in cents (e.g., 1000 = $10.00)
-  maxMultiplier: number; // Max multiplier players can choose (e.g., 10x)
-  maxPlayers: number; // Maximum players allowed
-  minPlayers: number; // Minimum players required (default 5)
+  readonly gameType: GameType;
+  readonly stackSize: AmountCents; // Base stake amount in cents (e.g., 1000 = $10.00)
+  readonly maxMultiplier: number; // Max multiplier players can choose (e.g., 10x)
+  readonly maxPlayers: number; // Maximum players allowed
+  readonly minPlayers: number; // Minimum players required (default 5)
 
   // Time Configuration
-  startDate: Date;
-  endDate: Date;
+  readonly startDate: Date;
+  readonly endDate: Date;
 
   // Checkpoints Configuration
-  totalCheckpoints: number; // How many checkpoints in this game
-  checkpointDescriptions: string[]; // Description of each checkpoint
+  readonly totalCheckpoints: number; // How many checkpoints in this game
+  readonly checkpointDescriptions: string[]; // Description of each checkpoint
 
   // Game State
   state: GameState;
@@ -135,9 +137,6 @@ export interface Game {
   totalCashouts: AmountCents; // Total amount paid out via cashouts in cents
   bonusPool: AmountCents; // Forfeited stakes available for distribution in cents
 
-  // Metadata
-  createdAt: Date;
-  startedAt?: Date; // When gameMaster started the game
   endedAt?: Date; // When game actually ended
 }
 
@@ -187,15 +186,17 @@ export const CreateGameSchema = z.object({
     .min(2, "Need at least 2 players")
     .max(1000, "Too many players"),
   minPlayers: z.number().int().min(2, "Need at least 2 players").default(5),
-  duration: z.number().positive("Duration must be positive"), // Duration in days
+  startDate: z.date().min(new Date(), "Start date must be in the future"),
+  endDate: z.date().min(new Date(), "End date must be in the future"),
+
   totalCheckpoints: z
     .number()
     .int()
-    .min(1, "Need at least 1 checkpoint")
-    .max(100, "Too many checkpoints"),
+    .max(100, "Too many checkpoints")
+    .min(1, "Need at least 1 checkpoint"),
   checkpointDescriptions: z
     .array(z.string().min(1, "Checkpoint description required"))
-    .min(1, "Need checkpoint descriptions"),
+    .min(1, "Need at least 1 checkpoint description"),
 });
 
 export const JoinGameSchema = z.object({
@@ -207,29 +208,51 @@ export const JoinGameSchema = z.object({
   multiplier: z.number().int().min(1, "Multiplier must be at least 1"),
 });
 
+export const MediaSchema = z.object({
+  id: UUIDSchema,
+  mediaUrl: z.string().min(1, "Media URL is required"),
+  mediaType: z.enum([
+    "IMAGE",
+    "VIDEO",
+    "AUDIO",
+    "TEXT",
+    "CODE",
+    "DOCUMENT",
+    "OTHER",
+  ]),
+  fileName: z.string().min(1, "File name is required"),
+  fileSize: z.number().int().min(1, "File size is required"),
+  mimeType: z.string().min(1, "Mime type is required"),
+  uploadedAt: z.date().min(new Date(), "Uploaded at must be in the future"),
+  checksum: z.string().min(1, "Checksum is required"),
+  tags: z.array(z.string()).min(1, "Tags are required"),
+  metadata: z.record(z.string(), z.string()).optional(),
+});
+
 export const SubmitCheckInSchema = z.object({
   playerId: UUIDSchema,
   checkpointNumber: z.number().int().min(1, "Invalid checkpoint number"),
-  submissionData: z.string().min(1, "Submission data is required"),
+  media: z.array(MediaSchema),
 });
 
 export const VerifyCheckInSchema = z.object({
   checkInId: UUIDSchema,
-  status: CheckInStatusSchema,
+  gameId: UUIDSchema,
+  gameMasterId: UUIDSchema,
+  status: z.enum(["APPROVED", "REJECTED"]),
   notes: z.string().optional(),
 });
 
 export const CashoutSchema = z.object({
   playerId: UUIDSchema,
-  checkpointNumber: z.number().int().min(1, "Invalid checkpoint number"),
 });
 
-export const StartGameSchema = z.object({
+export const EndGameSchema = z.object({
   gameId: UUIDSchema,
   gameMasterId: UUIDSchema,
 });
 
-export const EndGameSchema = z.object({
+export const StartGameSchema = z.object({
   gameId: UUIDSchema,
   gameMasterId: UUIDSchema,
 });

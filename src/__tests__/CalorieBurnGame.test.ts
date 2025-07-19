@@ -1,10 +1,10 @@
-import { gameService } from "../services/GameService.js";
-import { gameStorage } from "../storage/GameStorage.js";
-import { MoneyUtils } from "../types/index.js";
-import { v4 as uuidv4 } from "uuid";
-import type { UUID } from "../types/index.js";
 import * as fs from "fs";
 import * as path from "path";
+import { v4 as uuidv4 } from "uuid";
+import { gameService } from "../services/GameService.js";
+import { gameStorage } from "../storage/GameStorage.js";
+import type { Media, UUID } from "../types/index.js";
+import { MoneyUtils } from "../types/index.js";
 
 describe("Calorie Burn Challenge Game - Complete Flow", () => {
   let gameId: UUID;
@@ -13,10 +13,30 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
   let testOutput: string[] = [];
 
   // Helper function to log both to console and capture for file
-  const logAndCapture = (message: string) => {
+  const logAndCapture = (message: string): void => {
     console.log(message);
     testOutput.push(message);
   };
+
+  // Helper function to create media objects for testing
+  const createTestMedia = (
+    playerName: string,
+    checkpoint: number,
+    description: string
+  ): Media[] => [
+    {
+      id: uuidv4() as UUID,
+      mediaUrl: `https://example.com/${playerName.toLowerCase()}-workout-${checkpoint}.jpg`,
+      mediaType: "IMAGE" as const,
+      fileName: `${playerName.toLowerCase()}-workout-${checkpoint}.jpg`,
+      fileSize: 102400,
+      mimeType: "image/jpeg",
+      uploadedAt: new Date(),
+      checksum: `checksum-${playerName}-${checkpoint}`,
+      tags: [`workout-${checkpoint}`, playerName.toLowerCase()],
+      metadata: { description },
+    },
+  ];
 
   beforeEach(() => {
     // Clear storage before each test
@@ -51,7 +71,7 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
     logAndCapture("\n🎮 STEP 1: GameMaster creates the calorie burn game");
 
     const createGameResult = gameService.createGame({
-      gameMasterId: gameMasterId,
+      gameMasterId,
       title: "1000 Calorie Burn Challenge",
       description: "Burn 1000 calories in 7 days - 200 calories per checkpoint",
       gameType: "WORK_BASED",
@@ -59,7 +79,8 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
       maxMultiplier: 5,
       maxPlayers: 10,
       minPlayers: 3,
-      duration: 7, // 7 days
+      startDate: new Date(),
+      endDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days from now
       totalCheckpoints: 5,
       checkpointDescriptions: [
         "Checkpoint 1: Burn 200 calories (total: 200)",
@@ -115,8 +136,8 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
     logAndCapture("\n🚀 STEP 3: GameMaster starts the game");
 
     const startResult = gameService.startGame({
-      gameId: gameId,
-      gameMasterId: gameMasterId,
+      gameId,
+      gameMasterId,
     });
 
     expect(startResult.isOk()).toBe(true);
@@ -135,7 +156,11 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
       const submitResult = gameService.submitCheckIn(gameId, {
         playerId: players[0].id,
         checkpointNumber: checkpoint,
-        submissionData: `Alice burned 200 calories at gym - workout session ${checkpoint}. Heart rate avg: 145 bpm, duration: 45 min`,
+        media: createTestMedia(
+          "Alice",
+          checkpoint,
+          `Alice burned 200 calories at gym - workout session ${checkpoint}`
+        ),
       });
       expect(submitResult.isOk()).toBe(true);
       if (submitResult.isErr()) throw new Error("Failed to submit check-in");
@@ -145,6 +170,8 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
       // GameMaster verifies
       const verifyResult = gameService.verifyCheckIn(gameId, {
         checkInId: submitResult.value.id,
+        gameId,
+        gameMasterId,
         status: "APPROVED",
         notes: `Approved - Good workout session ${checkpoint}`,
       });
@@ -159,15 +186,19 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
       const submitResult = gameService.submitCheckIn(gameId, {
         playerId: players[1].id,
         checkpointNumber: checkpoint,
-        submissionData: `Bob jogged ${
-          checkpoint * 2
-        } miles, burned 200 calories`,
+        media: createTestMedia(
+          "Bob",
+          checkpoint,
+          `Bob jogged ${checkpoint * 2} miles, burned 200 calories`
+        ),
       });
       expect(submitResult.isOk()).toBe(true);
       if (submitResult.isErr()) throw new Error("Failed to submit check-in");
 
       const verifyResult = gameService.verifyCheckIn(gameId, {
         checkInId: submitResult.value.id,
+        gameId,
+        gameMasterId,
         status: "APPROVED",
         notes: "Good running session",
       });
@@ -179,7 +210,6 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
     // Bob cashes out
     const bobCashoutResult = gameService.cashOut(gameId, {
       playerId: players[1].id,
-      checkpointNumber: 3,
     });
     expect(bobCashoutResult.isOk()).toBe(true);
     if (bobCashoutResult.isErr()) throw new Error("Failed to cash out");
@@ -192,13 +222,19 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
       const submitResult = gameService.submitCheckIn(gameId, {
         playerId: players[2].id,
         checkpointNumber: checkpoint,
-        submissionData: `Charlie did CrossFit workout ${checkpoint} - 200 calories burned`,
+        media: createTestMedia(
+          "Charlie",
+          checkpoint,
+          `Charlie did CrossFit workout ${checkpoint} - 200 calories burned`
+        ),
       });
       expect(submitResult.isOk()).toBe(true);
       if (submitResult.isErr()) throw new Error("Failed to submit check-in");
 
       const verifyResult = gameService.verifyCheckIn(gameId, {
         checkInId: submitResult.value.id,
+        gameId,
+        gameMasterId,
         status: "APPROVED",
         notes: "Excellent CrossFit session",
       });
@@ -213,13 +249,19 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
       const submitResult = gameService.submitCheckIn(gameId, {
         playerId: players[3].id,
         checkpointNumber: checkpoint,
-        submissionData: `Diana did yoga class ${checkpoint} - 200 calories`,
+        media: createTestMedia(
+          "Diana",
+          checkpoint,
+          `Diana did yoga class ${checkpoint} - 200 calories`
+        ),
       });
       expect(submitResult.isOk()).toBe(true);
       if (submitResult.isErr()) throw new Error("Failed to submit check-in");
 
       const verifyResult = gameService.verifyCheckIn(gameId, {
         checkInId: submitResult.value.id,
+        gameId,
+        gameMasterId,
         status: "APPROVED",
         notes: "Good yoga session",
       });
@@ -231,7 +273,6 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
     // Diana cashes out
     const dianaCashoutResult = gameService.cashOut(gameId, {
       playerId: players[3].id,
-      checkpointNumber: 2,
     });
     expect(dianaCashoutResult.isOk()).toBe(true);
     if (dianaCashoutResult.isErr()) throw new Error("Failed to cash out");
@@ -243,13 +284,15 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
     const submitResult = gameService.submitCheckIn(gameId, {
       playerId: players[4].id,
       checkpointNumber: 1,
-      submissionData: "Eve went hiking - burned 200 calories",
+      media: createTestMedia("Eve", 1, "Eve went hiking - burned 200 calories"),
     });
     expect(submitResult.isOk()).toBe(true);
     if (submitResult.isErr()) throw new Error("Failed to submit check-in");
 
     const verifyResult = gameService.verifyCheckIn(gameId, {
       checkInId: submitResult.value.id,
+      gameId,
+      gameMasterId,
       status: "APPROVED",
       notes: "Nice hiking session",
     });
@@ -257,7 +300,6 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
 
     const eveCashoutResult = gameService.cashOut(gameId, {
       playerId: players[4].id,
-      checkpointNumber: 1,
     });
     expect(eveCashoutResult.isOk()).toBe(true);
     if (eveCashoutResult.isErr()) throw new Error("Failed to cash out");
@@ -271,8 +313,8 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
     logAndCapture("\n🏁 STEP 5: GameMaster ends the game");
 
     const endResult = gameService.endGame({
-      gameId: gameId,
-      gameMasterId: gameMasterId,
+      gameId,
+      gameMasterId,
     });
     expect(endResult.isOk()).toBe(true);
     if (endResult.isErr()) throw new Error("Failed to end game");
@@ -306,7 +348,7 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
 
     for (const winner of winners) {
       const stake = finalGame.stackSize * winner.multiplier;
-      const bonus = winner.bonusWon || 0;
+      const bonus = winner.bonusWon ?? 0;
       const totalPayout = stake + bonus;
 
       logAndCapture(`   ${winner.name}:`);
