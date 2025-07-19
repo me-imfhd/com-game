@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+build/
+*.min.js
+
+# Lock files
+package-lock.json
+yarn.lock
+bun.lockb
+
+# Logs
+*.log
+logs/
+
+# Environment files
+.env
+.env.local
+.env.production
+
+# Test outputs
+coverage/
+test-output-*.txt
+
+# Config files that should maintain their formatting
+.eslintrc.json
+tsconfig.json
+tsconfig.jest.json
+
+# Generated files
+*.d.ts
+
+# Documentation (if you want to preserve markdown formatting)
+# *.md 
