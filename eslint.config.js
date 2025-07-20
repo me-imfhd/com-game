@@ -53,7 +53,7 @@ export default [
       "@typescript-eslint/prefer-nullish-coalescing": "error",
       "@typescript-eslint/prefer-optional-chain": "error",
       "@typescript-eslint/parameter-properties": "warn",
-
+      "no-unused-expressions": "error",
       // General rules
       // "no-console": "warn",
       "no-debugger": "error",

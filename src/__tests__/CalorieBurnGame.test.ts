@@ -3,7 +3,7 @@ import * as path from "path";
 import { v4 as uuidv4 } from "uuid";
 import { gameService } from "../services/GameService.js";
 import { gameStorage } from "../storage/GameStorage.js";
-import type { Media, UUID } from "../types/index.js";
+import type { Proof, UUID } from "../types/index.js";
 import { MoneyUtils } from "../types/index.js";
 
 describe("Calorie Burn Challenge Game - Complete Flow", () => {
@@ -19,24 +19,30 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
   };
 
   // Helper function to create media objects for testing
-  const createTestMedia = (
+  const createTestProof = (
     playerName: string,
     checkpoint: number,
     description: string
-  ): Media[] => [
-    {
-      id: uuidv4() as UUID,
-      mediaUrl: `https://example.com/${playerName.toLowerCase()}-workout-${checkpoint}.jpg`,
-      mediaType: "IMAGE" as const,
-      fileName: `${playerName.toLowerCase()}-workout-${checkpoint}.jpg`,
-      fileSize: 102400,
-      mimeType: "image/jpeg",
-      uploadedAt: new Date(),
-      checksum: `checksum-${playerName}-${checkpoint}`,
-      tags: [`workout-${checkpoint}`, playerName.toLowerCase()],
-      metadata: { description },
-    },
-  ];
+  ): Proof => {
+    return {
+      description,
+      media: [
+        {
+          id: uuidv4() as UUID,
+          mediaUrl: `https://example.com/${playerName.toLowerCase()}-workout-${checkpoint}.jpg`,
+          mediaType: "IMAGE" as const,
+          fileName: `${playerName.toLowerCase()}-workout-${checkpoint}.jpg`,
+          fileSize: 102400,
+          mimeType: "image/jpeg",
+          uploadedAt: new Date(),
+          checksum: `checksum-${playerName}-${checkpoint}`,
+          tags: [`workout-${checkpoint}`, playerName.toLowerCase()],
+          metadata: { description },
+        },
+      ],
+      annotations: [],
+    };
+  };
 
   beforeEach(() => {
     // Clear storage before each test
@@ -70,6 +76,7 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
     // ================================================================================
     logAndCapture("\n🎮 STEP 1: GameMaster creates the calorie burn game");
 
+    const endDate = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
     const createGameResult = gameService.createGame({
       gameMasterId,
       title: "1000 Calorie Burn Challenge",
@@ -80,15 +87,38 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
       maxPlayers: 10,
       minPlayers: 3,
       startDate: new Date(),
-      endDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days from now
-      totalCheckpoints: 5,
-      checkpointDescriptions: [
-        "Checkpoint 1: Burn 200 calories (total: 200)",
-        "Checkpoint 2: Burn 200 calories (total: 400)",
-        "Checkpoint 3: Burn 200 calories (total: 600)",
-        "Checkpoint 4: Burn 200 calories (total: 800)",
-        "Checkpoint 5: Burn 200 calories (total: 1000) - COMPLETE!",
+      endDate, // 7 days from now
+      checkpoints: [
+        {
+          description: "Checkpoint 1: Burn 200 calories (total: 200)",
+          expiryDate: endDate,
+        },
+        {
+          description: "Checkpoint 2: Burn 200 calories (total: 400)",
+          expiryDate: endDate,
+        },
+        {
+          description: "Checkpoint 3: Burn 200 calories (total: 600)",
+          expiryDate: endDate,
+        },
+        {
+          description: "Checkpoint 4: Burn 200 calories (total: 800)",
+          expiryDate: endDate,
+        },
+        {
+          description:
+            "Checkpoint 5: Burn 200 calories (total: 1000) - COMPLETE!",
+          expiryDate: endDate,
+        },
       ],
+      objective: "Burn 1000 calories over 5 checkpoints",
+      playerAction: "Submit workout screenshots showing calories burned",
+      rewardDescription:
+        "Win up to 3x your stake if you complete all checkpoints",
+      failureCondition:
+        "Missing a checkpoint or not reaching calorie targets forfeits your stake",
+      forceCashoutOnMiss: false,
+      verificationMethod: "GAMEMASTER" as const,
     });
 
     expect(createGameResult.isOk()).toBe(true);
@@ -98,7 +128,7 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
 
     logAndCapture(`✅ Game created: ${game.title}`);
     logAndCapture(`   Stack size: ${MoneyUtils.formatCents(game.stackSize)}`);
-    logAndCapture(`   Total checkpoints: ${game.totalCheckpoints}`);
+    logAndCapture(`   Total checkpoints: ${game.checkpoints.length}`);
     logAndCapture(`   Game ID: ${gameId}`);
 
     // ================================================================================
@@ -153,10 +183,10 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
     logAndCapture("\n👤 Alice's journey (completes all checkpoints):");
     for (let checkpoint = 1; checkpoint <= 5; checkpoint++) {
       // Submit proof
-      const submitResult = gameService.submitCheckIn(gameId, {
+      const submitResult = await gameService.submitCheckIn(gameId, {
         playerId: players[0].id,
         checkpointNumber: checkpoint,
-        media: createTestMedia(
+        proof: createTestProof(
           "Alice",
           checkpoint,
           `Alice burned 200 calories at gym - workout session ${checkpoint}`
@@ -183,10 +213,10 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
     // Bob completes 3 checkpoints, then cashes out
     logAndCapture("\n👤 Bob's journey (cashes out at checkpoint 3):");
     for (let checkpoint = 1; checkpoint <= 3; checkpoint++) {
-      const submitResult = gameService.submitCheckIn(gameId, {
+      const submitResult = await gameService.submitCheckIn(gameId, {
         playerId: players[1].id,
         checkpointNumber: checkpoint,
-        media: createTestMedia(
+        proof: createTestProof(
           "Bob",
           checkpoint,
           `Bob jogged ${checkpoint * 2} miles, burned 200 calories`
@@ -219,10 +249,10 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
     // Charlie completes all 5 checkpoints (will be a winner)
     logAndCapture("\n👤 Charlie's journey (completes all checkpoints):");
     for (let checkpoint = 1; checkpoint <= 5; checkpoint++) {
-      const submitResult = gameService.submitCheckIn(gameId, {
+      const submitResult = await gameService.submitCheckIn(gameId, {
         playerId: players[2].id,
         checkpointNumber: checkpoint,
-        media: createTestMedia(
+        proof: createTestProof(
           "Charlie",
           checkpoint,
           `Charlie did CrossFit workout ${checkpoint} - 200 calories burned`
@@ -246,10 +276,10 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
     // Diana completes 2 checkpoints, then cashes out
     logAndCapture("\n👤 Diana's journey (cashes out at checkpoint 2):");
     for (let checkpoint = 1; checkpoint <= 2; checkpoint++) {
-      const submitResult = gameService.submitCheckIn(gameId, {
+      const submitResult = await gameService.submitCheckIn(gameId, {
         playerId: players[3].id,
         checkpointNumber: checkpoint,
-        media: createTestMedia(
+        proof: createTestProof(
           "Diana",
           checkpoint,
           `Diana did yoga class ${checkpoint} - 200 calories`
@@ -281,10 +311,10 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
 
     // Eve completes 1 checkpoint, then cashes out
     logAndCapture("\n👤 Eve's journey (cashes out at checkpoint 1):");
-    const submitResult = gameService.submitCheckIn(gameId, {
+    const submitResult = await gameService.submitCheckIn(gameId, {
       playerId: players[4].id,
       checkpointNumber: 1,
-      media: createTestMedia("Eve", 1, "Eve went hiking - burned 200 calories"),
+      proof: createTestProof("Eve", 1, "Eve went hiking - burned 200 calories"),
     });
     expect(submitResult.isOk()).toBe(true);
     if (submitResult.isErr()) throw new Error("Failed to submit check-in");
@@ -369,7 +399,7 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
       const stake = finalGame.stackSize * player.multiplier;
       const checkpoints = player.foldedAtCheckpoint!;
       const cashoutAmount = Math.floor(
-        (stake / finalGame.totalCheckpoints) * checkpoints
+        (stake / finalGame.checkpoints.length) * checkpoints
       );
       const forfeited = stake - cashoutAmount;
 

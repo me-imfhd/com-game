@@ -140,9 +140,17 @@ export class GameStorage {
     game.checkIns.push(checkIn);
   }
 
+  deleteCheckInUncheckedMut(gameId: UUID, checkInId: UUID): void {
+    const game = this.games.get(gameId);
+    if (!game) throw new Error("Game not found");
+    game.checkIns = game.checkIns.filter((c) => c.id !== checkInId);
+  }
+
   approveCheckInUncheckedMut(
     gameId: UUID,
     checkInId: UUID,
+    verifiedBy: "GAMEMASTER" | "AI",
+    aiConfidence?: number,
     notes?: string
   ): void {
     const game = this.games.get(gameId);
@@ -153,6 +161,10 @@ export class GameStorage {
 
     const checkIn = game.checkIns[checkInIndex];
     checkIn.verifiedAt = new Date();
+    checkIn.verifiedBy = verifiedBy;
+    if (aiConfidence !== undefined) {
+      checkIn.aiConfidence = aiConfidence;
+    }
     checkIn.notes = notes;
     checkIn.status = "APPROVED";
   }
@@ -160,6 +172,8 @@ export class GameStorage {
   rejectCheckInUncheckedMut(
     gameId: UUID,
     checkInId: UUID,
+    verifiedBy: "GAMEMASTER" | "AI",
+    aiConfidence?: number,
     notes?: string
   ): void {
     const game = this.games.get(gameId);
@@ -170,6 +184,29 @@ export class GameStorage {
 
     const checkIn = game.checkIns[checkInIndex];
     checkIn.status = "REJECTED";
+    checkIn.verifiedAt = new Date();
+    checkIn.verifiedBy = verifiedBy;
+    checkIn.aiConfidence = aiConfidence;
+    checkIn.notes = notes;
+  }
+
+  needsReviewCheckInUncheckedMut(
+    gameId: UUID,
+    checkInId: UUID,
+    verifiedBy: "GAMEMASTER" | "AI",
+    aiConfidence?: number,
+    notes?: string
+  ): void {
+    const game = this.games.get(gameId);
+    if (!game) throw new Error("Game not found");
+
+    const checkInIndex = game.checkIns.findIndex((c) => c.id === checkInId);
+    if (checkInIndex === -1) throw new Error("Check-in not found");
+
+    const checkIn = game.checkIns[checkInIndex];
+    checkIn.status = "PENDING";
+    checkIn.verifiedBy = verifiedBy;
+    checkIn.aiConfidence = aiConfidence;
     checkIn.notes = notes;
   }
 

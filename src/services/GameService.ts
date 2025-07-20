@@ -1,4 +1,4 @@
-import { Result, err, ok } from "neverthrow";
+import { err, ok, Result } from "neverthrow";
 import { v4 as uuidv4 } from "uuid";
 import { gameStorage } from "../storage/GameStorage.js";
 import type {
@@ -26,11 +26,18 @@ import {
 import {
   GameError,
   GameErrors,
+  InvalidSubmissionError,
+  LLMError,
   PaymentError,
   PlayerError,
   PlayerErrors,
   ValidationError,
 } from "../utils/errors.js";
+import {
+  createLLM,
+  type ModelConfig,
+  type VerificationRequest,
+} from "./LLMService.js";
 
 /**
  * Game Service - Handles all game business logic with Result pattern
@@ -65,20 +72,12 @@ export class GameService {
       input = inputParsed.data;
       const gameId = uuidv4() as UUID;
 
-      // length of checkpointDescriptions should be equal to totalCheckpoints
-      if (input.checkpointDescriptions.length !== input.totalCheckpoints) {
-        return err(
-          new ValidationError(
-            "Checkpoint descriptions must match total checkpoints"
-          )
-        );
-      }
-
       // Validate that end date is after start date
       if (input.endDate <= input.startDate) {
         return err(new ValidationError("End date must be after start date"));
       }
 
+      // AI verification is already sanitized by Zod schema if provided
       const game: Game = {
         id: gameId,
         gameMasterId: input.gameMasterId as UUID,
@@ -91,8 +90,14 @@ export class GameService {
         minPlayers: input.minPlayers,
         startDate: input.startDate,
         endDate: input.endDate,
-        totalCheckpoints: input.totalCheckpoints,
-        checkpointDescriptions: input.checkpointDescriptions,
+        checkpoints: input.checkpoints,
+        verificationMethod: input.verificationMethod,
+        aiVerification: input.aiVerification,
+        objective: input.objective,
+        playerAction: input.playerAction,
+        rewardDescription: input.rewardDescription,
+        failureCondition: input.failureCondition,
+        forceCashoutOnMiss: input.forceCashoutOnMiss,
         state: "WAITING_FOR_PLAYERS",
         players: [],
         checkIns: [],
@@ -252,10 +257,10 @@ export class GameService {
   /**
    * Submit a check-in for verification
    */
-  submitCheckIn(
+  async submitCheckIn(
     gameId: UUID,
     input: SubmitCheckInInput
-  ): Result<CheckIn, GameError | PlayerError> {
+  ): Promise<Result<CheckIn, GameError | PlayerError>> {
     const inputParsed = SubmitCheckInSchema.safeParse(input);
     if (!inputParsed.success) {
       return err(new ValidationError(inputParsed.error.message));
@@ -280,11 +285,11 @@ export class GameService {
       return err(PlayerErrors.PLAYER_ALREADY_FOLDED(input.playerId));
     }
 
-    if (input.checkpointNumber > game.totalCheckpoints) {
+    if (input.checkpointNumber > game.checkpoints.length) {
       return err(
         PlayerErrors.INVALID_CHECKPOINT(
           input.checkpointNumber,
-          game.totalCheckpoints
+          game.checkpoints.length
         )
       );
     }
@@ -324,7 +329,7 @@ export class GameService {
       playerId: input.playerId,
       gameId,
       checkpointNumber: input.checkpointNumber,
-      media: input.media,
+      proof: input.proof,
       submittedAt: new Date(),
       status: "PENDING",
     };
@@ -332,12 +337,154 @@ export class GameService {
     // 1. Add check-in to game
     gameStorage.addCheckInUncheckedMut(gameId, checkIn);
 
-    // 2. Return the check-in
+    // 2. If AI verification is enabled, trigger automatic verification
+    if (game.verificationMethod === "AI") {
+      // Trigger AI verification asynchronously (don't wait for result)
+      const result = await this.verifyCheckInWithAI(gameId, checkIn.id);
+      if (result.isErr()) {
+        // revert check-in creation and return error
+        gameStorage.deleteCheckInUncheckedMut(gameId, checkIn.id);
+        return err(result.error);
+      }
+    }
+    // Check if this is the final checkpoint and player completed it
+    const isLastCheckpoint =
+      checkIn.checkpointNumber === game.checkpoints.length;
+
+    if (isLastCheckpoint && checkIn.status === "APPROVED") {
+      // Player completed the final checkpoint successfully
+      const completedPlayer = game.players.find(
+        (p) => p.id === checkIn.playerId
+      );
+      if (
+        completedPlayer &&
+        completedPlayer.checkpointsCompleted === game.checkpoints.length
+      ) {
+        // Player has completed all checkpoints - they'll get rewards when game ends
+        console.log(
+          `Player ${completedPlayer.name} completed all checkpoints!`
+        );
+      }
+    }
+    // 3. Return the check-in
     const checkInCopy = gameStorage.getCheckInUncheckedCopy(gameId, checkIn.id);
     if (!checkInCopy) {
       throw new Error("Check-in not found, this should never happen");
     }
     return ok(checkInCopy);
+  }
+
+  /**
+   * Verify a check-in using AI
+   */
+  private async verifyCheckInWithAI(
+    gameId: UUID,
+    checkInId: UUID
+  ): Promise<Result<CheckIn, GameError | LLMError | InvalidSubmissionError>> {
+    const game = gameStorage.getGameCopy(gameId);
+    if (!game) {
+      return err(GameErrors.GAME_NOT_FOUND(gameId));
+    }
+
+    if (game.verificationMethod !== "AI" || !game.aiVerification) {
+      return err(new GameError("AI verification is not enabled for this game"));
+    }
+
+    const checkIn = gameStorage.getCheckInUncheckedCopy(gameId, checkInId);
+    if (!checkIn) {
+      return err(GameErrors.CHECK_IN_NOT_FOUND(checkInId));
+    }
+
+    if (checkIn.status !== "PENDING") {
+      return err(new GameError("Check-in is not pending verification"));
+    }
+
+    // Get AI configuration from environment
+    const aiConfig: ModelConfig = {
+      apiKey: process.env.OPENAI_API_KEY ?? "",
+      baseUrl:
+        process.env.OPENAI_BASE_URL ??
+        "https://api.openai.com/v1/chat/completions",
+      model: process.env.OPENAI_MODEL ?? "gpt-4",
+      provider: "openai",
+    };
+
+    if (!aiConfig.apiKey) {
+      return err(new LLMError("AI API key not configured"));
+    }
+
+    const llm = createLLM(aiConfig);
+
+    // Build verification request
+    const verificationRequest: VerificationRequest = {
+      objective: game.objective,
+      playerAction: game.playerAction,
+      rewardDescription: game.rewardDescription,
+      failureCondition: game.failureCondition,
+      prompt: game.aiVerification.prompt,
+      checkpointDescription:
+        game.checkpoints[checkIn.checkpointNumber - 1].description,
+      submissionData: {
+        proof: checkIn.proof,
+      },
+      sampleApprovals:
+        game.checkpoints[checkIn.checkpointNumber - 1].sampleApproval,
+      sampleRejections:
+        game.checkpoints[checkIn.checkpointNumber - 1].sampleRejection,
+    };
+
+    const verificationResult = await llm.verifyCheckIn(verificationRequest);
+
+    if (verificationResult.isErr()) {
+      return err(verificationResult.error);
+    }
+
+    const verification = verificationResult.value;
+
+    // Update check-in based on AI decision
+    if (verification.decision === "APPROVED") {
+      gameStorage.approveCheckInUncheckedMut(
+        gameId,
+        checkInId,
+        "AI",
+        verification.confidence,
+        verification.reasoning
+      );
+
+      // Update player progress
+      gameStorage.increasePlayerProgressUncheckedMut(gameId, checkIn.playerId);
+    } else if (verification.decision === "REJECTED") {
+      gameStorage.rejectCheckInUncheckedMut(
+        gameId,
+        checkInId,
+        "AI",
+        verification.confidence,
+        verification.reasoning
+      );
+    } else if (verification.decision === "NEEDS_REVIEW") {
+      gameStorage.needsReviewCheckInUncheckedMut(
+        gameId,
+        checkInId,
+        "AI",
+        verification.confidence,
+        verification.reasoning
+      );
+    } else if (verification.decision === "INVALID_SUBMISSION") {
+      // Mark as invalid submission
+      return err(
+        new InvalidSubmissionError(
+          `Invalid submission: ${verification.reasoning}. Please provide clearer verification materials.`,
+          verification.confidence
+        )
+      );
+    }
+
+    const finalCheckIn = gameStorage.getCheckInUncheckedCopy(gameId, checkInId);
+    if (!finalCheckIn) {
+      throw new Error("Check-in not found, this should never happen");
+    }
+
+    return ok(finalCheckIn);
   }
 
   /**
@@ -401,10 +548,12 @@ export class GameService {
         gameStorage.approveCheckInUncheckedMut(
           gameId,
           input.checkInId,
+          "GAMEMASTER",
+          undefined,
           input.notes
         );
 
-        // player exists and is not folded
+        // Update player progress
         gameStorage.increasePlayerProgressUncheckedMut(
           gameId,
           checkIn.playerId
@@ -415,6 +564,8 @@ export class GameService {
         gameStorage.rejectCheckInUncheckedMut(
           gameId,
           input.checkInId,
+          "GAMEMASTER",
+          undefined,
           input.notes
         );
         break;
@@ -458,7 +609,7 @@ export class GameService {
     // Calculate cashout amount
     const stake = game.stackSize * player.multiplier;
     const cashoutAmount = Math.floor(
-      (stake * player.checkpointsCompleted) / game.totalCheckpoints
+      (stake * player.checkpointsCompleted) / game.checkpoints.length
     );
     const forfeitedAmount = stake - cashoutAmount;
 
@@ -471,7 +622,7 @@ export class GameService {
       amount: cashoutAmount,
       timestamp: new Date(),
       description: `Cashout at checkpoint ${player.checkpointsCompleted} of ${
-        game.totalCheckpoints
+        game.checkpoints.length
       }: ${MoneyUtils.formatCents(cashoutAmount)} for ${player.name}`,
     };
 
@@ -590,7 +741,7 @@ export class GameService {
     const nonCashedOutPlayers = game.players.filter(
       (p) =>
         p.foldedAtCheckpoint === undefined &&
-        p.checkpointsCompleted !== game.totalCheckpoints
+        p.checkpointsCompleted !== game.checkpoints.length
     );
 
     for (const player of nonCashedOutPlayers) {
@@ -602,7 +753,7 @@ export class GameService {
     const winners = game.players.filter(
       (p) =>
         p.foldedAtCheckpoint === undefined &&
-        p.checkpointsCompleted === game.totalCheckpoints
+        p.checkpointsCompleted === game.checkpoints.length
     );
 
     if (winners.length > 0 && game.bonusPool > 0) {

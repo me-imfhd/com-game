@@ -1,4 +1,9 @@
 import { z } from "zod";
+import { SecureAIPromptSchema } from "./security";
+
+/**
+ * BASIC TYPES
+ */
 
 /**
  * COMMITMENT CHALLENGE GAME - TYPE DEFINITIONS
@@ -28,6 +33,10 @@ export type GameState = z.infer<typeof GameStateSchema>;
 export type CheckInStatus = z.infer<typeof CheckInStatusSchema>;
 export type UUID = z.infer<typeof UUIDSchema>;
 export type Media = z.infer<typeof MediaSchema>;
+export type MediaFormat = z.infer<typeof MediaFormatSchema>;
+export type AIVerification = z.infer<typeof AIVerificationSchema>;
+export type Checkpoint = z.infer<typeof CheckpointSchema>;
+export type Proof = z.infer<typeof ProofSchema>;
 
 // ================================================================================
 // MONETARY TYPES - All amounts stored as cents (integers) to avoid floating point issues
@@ -68,12 +77,17 @@ export interface CheckIn {
   gameId: UUID;
   checkpointNumber: number; // Which checkpoint this is for
   // Media
-  media: Media[];
+  proof: Proof;
   submittedAt: Date;
   status: CheckInStatus;
   verifiedAt?: Date;
+  verifiedBy?: "GAMEMASTER" | "AI"; // Who verified this check-in
+  aiConfidence?: number; // AI confidence level if verified by AI
   notes?: string; // GameMaster's verification notes
 }
+
+// Verification method for the game
+export type VerificationMethod = "GAMEMASTER" | "AI";
 
 // Transaction Types for All Payments
 export type TransactionType = "INITIAL_STAKE" | "CASHOUT" | "PAYOUT";
@@ -123,8 +137,18 @@ export interface Game {
   readonly endDate: Date;
 
   // Checkpoints Configuration
-  readonly totalCheckpoints: number; // How many checkpoints in this game
-  readonly checkpointDescriptions: string[]; // Description of each checkpoint
+  readonly checkpoints: Checkpoint[]; // Description of each checkpoint
+  readonly forceCashoutOnMiss: boolean; // If true, players will be forced to cash out if they miss a checkpoint
+
+  // Verification Configuration
+  readonly verificationMethod: VerificationMethod; // How check-ins are verified
+  readonly aiVerification?: AIVerification; // AI verification settings if enabled
+
+  // Human-Readable Game Definition
+  readonly objective: string; // e.g., "Avoid using your phone for more than 1 hour/day"
+  readonly playerAction: string; // e.g., "Submit a daily screenshot of Screen Time showing <1h"
+  readonly rewardDescription: string; // e.g., "Win 3x your stake if you complete all 3 days"
+  readonly failureCondition: string; // e.g., "Submitting a screen time above 1h will forfeit your stake"
 
   // Game State
   state: GameState;
@@ -168,37 +192,6 @@ export const DollarAmountSchema = z
   .max(1000000, "Amount too large") // Max $1,000,000.00
   .transform((dollars) => MoneyUtils.dollarsToCents(dollars));
 
-// API Input Schemas
-export const CreateGameSchema = z.object({
-  gameMasterId: z.string().min(1, "GameMaster ID is required"),
-  title: z.string().min(1, "Title is required").max(100, "Title too long"),
-  description: z.string().optional(),
-  gameType: GameTypeSchema,
-  stackSize: DollarAmountSchema, // Accepts dollars, converts to cents
-  maxMultiplier: z
-    .number()
-    .int()
-    .min(1, "Max multiplier must be at least 1")
-    .max(100, "Max multiplier too high"),
-  maxPlayers: z
-    .number()
-    .int()
-    .min(2, "Need at least 2 players")
-    .max(1000, "Too many players"),
-  minPlayers: z.number().int().min(2, "Need at least 2 players").default(5),
-  startDate: z.date().min(new Date(), "Start date must be in the future"),
-  endDate: z.date().min(new Date(), "End date must be in the future"),
-
-  totalCheckpoints: z
-    .number()
-    .int()
-    .max(100, "Too many checkpoints")
-    .min(1, "Need at least 1 checkpoint"),
-  checkpointDescriptions: z
-    .array(z.string().min(1, "Checkpoint description required"))
-    .min(1, "Need at least 1 checkpoint description"),
-});
-
 export const JoinGameSchema = z.object({
   playerId: UUIDSchema,
   playerName: z
@@ -208,18 +201,20 @@ export const JoinGameSchema = z.object({
   multiplier: z.number().int().min(1, "Multiplier must be at least 1"),
 });
 
+export const MediaFormatSchema = z.enum([
+  "IMAGE",
+  "VIDEO",
+  "AUDIO",
+  "TEXT",
+  "CODE",
+  "DOCUMENT",
+  "OTHER",
+]);
+
 export const MediaSchema = z.object({
   id: UUIDSchema,
   mediaUrl: z.string().min(1, "Media URL is required"),
-  mediaType: z.enum([
-    "IMAGE",
-    "VIDEO",
-    "AUDIO",
-    "TEXT",
-    "CODE",
-    "DOCUMENT",
-    "OTHER",
-  ]),
+  mediaType: MediaFormatSchema,
   fileName: z.string().min(1, "File name is required"),
   fileSize: z.number().int().min(1, "File size is required"),
   mimeType: z.string().min(1, "Mime type is required"),
@@ -229,10 +224,59 @@ export const MediaSchema = z.object({
   metadata: z.record(z.string(), z.string()).optional(),
 });
 
+export const ProofSchema = z.object({
+  description: z
+    .string()
+    .min(1, "Proof description required")
+    .transform((text) => {
+      if (!text) return "";
+
+      return text
+        .replace(/[<>]/g, "") // Remove angle brackets
+        .replace(/\{[^}]*"decision"[^}]*\}/gi, "[REMOVED_SUSPICIOUS_JSON]") // Remove JSON-like structures
+        .replace(/```[\s\S]*?```/g, "[REMOVED_CODE_BLOCK]") // Remove code blocks
+        .replace(/\[SYSTEM\]/gi, "[REMOVED]")
+        .replace(/\[ADMIN\]/gi, "[REMOVED]")
+        .replace(/\[OVERRIDE\]/gi, "[REMOVED]")
+        .substring(0, 1000) // Limit length
+        .trim();
+    }),
+  media: z.array(MediaSchema),
+  annotations: z
+    .array(
+      z.string().transform((text) => {
+        if (!text) return "";
+
+        return text
+          .replace(/[<>]/g, "") // Remove angle brackets
+          .replace(/\{[^}]*"decision"[^}]*\}/gi, "[REMOVED_SUSPICIOUS_JSON]") // Remove JSON-like structures
+          .replace(/```[\s\S]*?```/g, "[REMOVED_CODE_BLOCK]") // Remove code blocks
+          .replace(/\[SYSTEM\]/gi, "[REMOVED]")
+          .replace(/\[ADMIN\]/gi, "[REMOVED]")
+          .replace(/\[OVERRIDE\]/gi, "[REMOVED]")
+          .substring(0, 1000) // Limit length
+          .trim();
+      })
+    )
+    .optional(),
+});
+
 export const SubmitCheckInSchema = z.object({
   playerId: UUIDSchema,
   checkpointNumber: z.number().int().min(1, "Invalid checkpoint number"),
-  media: z.array(MediaSchema),
+  proof: ProofSchema,
+});
+
+// AI Verification Configuration
+export const AIVerificationSchema = z.object({
+  // AI Prompting
+  prompt: SecureAIPromptSchema,
+  criteria: z
+    .array(z.string())
+    .min(1, "Criteria are required")
+    .max(1000, "Criteria must be less than 1000"),
+  trustThreshold: z.number().int().min(0).max(100), // 0–100 score from AI verifier
+  // Take sample proofs from checkpoints
 });
 
 export const VerifyCheckInSchema = z.object({
@@ -256,6 +300,109 @@ export const StartGameSchema = z.object({
   gameId: UUIDSchema,
   gameMasterId: UUIDSchema,
 });
+
+const CheckpointSchema = z.object({
+  description: z.string().min(10, "Checkpoint description is required"),
+  expiryDate: z.date(), // set to endDate if not provided
+  sampleApproval: ProofSchema.optional(),
+  sampleRejection: ProofSchema.optional(),
+});
+
+// API Input Schemas
+export const CreateGameSchema = z
+  .object({
+    gameMasterId: z.string().min(1, "GameMaster ID is required"),
+    title: z.string().min(1, "Title is required").max(100, "Title too long"),
+    description: z.string().optional(),
+    gameType: GameTypeSchema,
+    stackSize: DollarAmountSchema, // Accepts dollars, converts to cents
+    maxMultiplier: z
+      .number()
+      .int()
+      .min(1, "Max multiplier must be at least 1")
+      .max(100, "Max multiplier too high"),
+    maxPlayers: z
+      .number()
+      .int()
+      .min(2, "Need at least 2 players")
+      .max(1000, "Too many players"),
+    minPlayers: z.number().int().min(2, "Need at least 2 players").default(5),
+    startDate: z.date().min(new Date(), "Start date must be in the future"),
+    endDate: z.date().min(new Date(), "End date must be in the future"),
+
+    checkpoints: z.array(CheckpointSchema).min(1, "Need at least 1 checkpoint"),
+
+    // Verification Configuration
+    verificationMethod: z.enum(["GAMEMASTER", "AI"]).default("GAMEMASTER"),
+    aiVerification: AIVerificationSchema.optional(),
+    // Human-Readable Game Definition
+    objective: z.string().min(10, "Objective is required"), // e.g., "Avoid using your phone for more than 1 hour/day"
+    playerAction: z.string().min(10, "Action players must take"), // e.g., "Submit a daily screenshot of Screen Time showing <1h"
+    rewardDescription: z.string().min(5, "Reward must be defined"), // e.g., "Win 3x your stake if you complete all 3 days"
+    failureCondition: z.string().min(5, "Define what constitutes failure"), // e.g., "Submitting a screen time above 1h will forfeit your stake"
+
+    forceCashoutOnMiss: z.boolean().default(false),
+  })
+  .refine(
+    (data) => {
+      // If AI verification is selected, aiVerification settings must be provided
+      if (data.verificationMethod === "AI" && !data.aiVerification) {
+        return false;
+      }
+      return true;
+    },
+    {
+      message:
+        "AI verification settings are required when verification method is AI",
+      path: ["aiVerification"],
+    }
+  )
+  .refine(
+    (data) => {
+      const { startDate, endDate } = data;
+
+      // Rule 1: Game must be at least 1 hour long
+      if (
+        endDate <= startDate ||
+        endDate.getTime() - startDate.getTime() < 3600000
+      ) {
+        return false;
+      }
+
+      return true;
+    },
+    {
+      message: "Game must be at least 1 hour long",
+      path: ["endDate"],
+    }
+  )
+  .refine(
+    (data) => {
+      const { startDate, endDate, checkpoints } = data;
+
+      for (let i = 0; i < checkpoints.length; i++) {
+        const expiry = checkpoints[i].expiryDate;
+
+        if (expiry < startDate || expiry > endDate) {
+          return false;
+        }
+
+        if (i > 0) {
+          const prevExpiry = checkpoints[i - 1].expiryDate;
+          if (expiry < prevExpiry) {
+            return false;
+          }
+        }
+      }
+
+      return true;
+    },
+    {
+      message:
+        "Each checkpoint must expire between game start and end, and expiry dates must be in increasing order.",
+      path: ["checkpoints"],
+    }
+  );
 
 // ================================================================================
 // INFERRED TYPES FROM ZOD SCHEMAS

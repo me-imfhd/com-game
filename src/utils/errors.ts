@@ -95,6 +95,23 @@ export class PaymentError extends Error {
   }
 }
 
+export class LLMError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LLMError";
+  }
+}
+
+export class InvalidSubmissionError extends Error {
+  public aiConfidence: number;
+
+  constructor(message: string, aiConfidence: number) {
+    super(message);
+    this.name = "InvalidSubmissionError";
+    this.aiConfidence = aiConfidence;
+  }
+}
+
 // Specific game error types
 export const GameErrors = {
   GAME_NOT_FOUND: (gameId: string) => new GameError(`Game ${gameId} not found`),
