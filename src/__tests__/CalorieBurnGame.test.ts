@@ -3,8 +3,8 @@ import * as path from "path";
 import { v4 as uuidv4 } from "uuid";
 import { gameService } from "../services/GameService.js";
 import { gameStorage } from "../storage/GameStorage.js";
-import type { Proof, UUID } from "../types/index.js";
-import { MoneyUtils } from "../types/index.js";
+import type { Media, Proof, UUID } from "../types/index.js";
+import { MediaSchema, MoneyUtils, ProofSchema } from "../types/index.js";
 
 describe("Calorie Burn Challenge Game - Complete Flow", () => {
   let gameId: UUID;
@@ -18,30 +18,90 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
     testOutput.push(message);
   };
 
-  // Helper function to create media objects for testing
+  // Helper function to create valid media for testing
+  const createTestMedia = (
+    playerName: string,
+    checkpoint: number,
+    description: string,
+    mediaType: "IMAGE" | "TEXT" = "IMAGE"
+  ): Media => {
+    const baseFileName = `${playerName.toLowerCase()}-workout-${checkpoint}`;
+    const extensions = { IMAGE: "jpg", TEXT: "txt" };
+    const mimeTypes = { IMAGE: "image/jpeg", TEXT: "text/plain" };
+    const fileSizes = { IMAGE: 512000, TEXT: 1024 }; // 512KB for images, 1KB for text
+
+    return {
+      id: uuidv4() as UUID,
+      mediaUrl: `https://example.com/${baseFileName}.${extensions[mediaType]}`,
+      mediaType,
+      fileName: `${baseFileName}.${extensions[mediaType]}`,
+      fileSize: fileSizes[mediaType],
+      mimeType: mimeTypes[mediaType],
+      uploadedAt: new Date(),
+      checksum: `checksum-${playerName}-${checkpoint}`,
+      tags: [`workout-${checkpoint}`, playerName.toLowerCase()],
+      metadata: { description },
+    };
+  };
+
+  // Helper function to create proof objects for testing
   const createTestProof = (
     playerName: string,
     checkpoint: number,
-    description: string
+    description: string,
+    includeText = false
   ): Proof => {
+    const media: Media[] = [
+      createTestMedia(playerName, checkpoint, description, "IMAGE"),
+    ];
+
+    // Optionally add text media for comprehensive testing
+    if (includeText) {
+      media.push(
+        createTestMedia(
+          playerName,
+          checkpoint,
+          `Text log: ${description}`,
+          "TEXT"
+        )
+      );
+    }
+
     return {
       description,
-      media: [
-        {
-          id: uuidv4() as UUID,
-          mediaUrl: `https://example.com/${playerName.toLowerCase()}-workout-${checkpoint}.jpg`,
-          mediaType: "IMAGE" as const,
-          fileName: `${playerName.toLowerCase()}-workout-${checkpoint}.jpg`,
-          fileSize: 102400,
-          mimeType: "image/jpeg",
-          uploadedAt: new Date(),
-          checksum: `checksum-${playerName}-${checkpoint}`,
-          tags: [`workout-${checkpoint}`, playerName.toLowerCase()],
-          metadata: { description },
-        },
+      media,
+      annotations: [
+        `Workout completed by ${playerName}`,
+        `Checkpoint ${checkpoint} verification`,
       ],
-      annotations: [],
     };
+  };
+
+  // Helper function to create invalid media for validation testing
+  const createInvalidMedia = (
+    type: "oversized" | "unsupported" | "invalid_format"
+  ): Media => {
+    const baseMedia = createTestMedia("test", 1, "Invalid media test");
+
+    switch (type) {
+      case "oversized":
+        return { ...baseMedia, fileSize: 25 * 1024 * 1024 }; // 25MB (over 20MB limit)
+      case "unsupported":
+        return {
+          ...baseMedia,
+          mediaType: "VIDEO" as any,
+          mimeType: "video/mp4",
+          fileName: "workout.mp4",
+        };
+      case "invalid_format":
+        return {
+          ...baseMedia,
+          mimeType: "image/bmp", // Unsupported image format
+          fileName: "workout.bmp",
+        };
+      default:
+        return baseMedia;
+    }
   };
 
   beforeEach(() => {
@@ -53,12 +113,143 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
     // Setup test data
     gameMasterId = uuidv4() as UUID;
     players = [
-      { id: uuidv4() as UUID, name: "Alice", multiplier: 2 }, // $20 stake
-      { id: uuidv4() as UUID, name: "Bob", multiplier: 1 }, // $10 stake
-      { id: uuidv4() as UUID, name: "Charlie", multiplier: 3 }, // $30 stake
-      { id: uuidv4() as UUID, name: "Diana", multiplier: 1 }, // $10 stake
-      { id: uuidv4() as UUID, name: "Eve", multiplier: 2 }, // $20 stake
+      { id: uuidv4() as UUID, name: "Alice", multiplier: 2 },
+      { id: uuidv4() as UUID, name: "Bob", multiplier: 3 },
+      { id: uuidv4() as UUID, name: "Charlie", multiplier: 1 },
+      { id: uuidv4() as UUID, name: "Diana", multiplier: 2 },
+      { id: uuidv4() as UUID, name: "Eve", multiplier: 1 },
     ];
+  });
+
+  describe("Media Validation Tests", () => {
+    it("should validate supported media types for AI verification", () => {
+      const validImageMedia = createTestMedia(
+        "alice",
+        1,
+        "Valid image",
+        "IMAGE"
+      );
+      const validTextMedia = createTestMedia("alice", 1, "Valid text", "TEXT");
+
+      // Test valid media through schema validation
+      const imageResult = MediaSchema.safeParse(validImageMedia);
+      const textResult = MediaSchema.safeParse(validTextMedia);
+
+      expect(imageResult.success).toBe(true);
+      expect(textResult.success).toBe(true);
+    });
+
+    it("should reject unsupported media types", () => {
+      const unsupportedMedia = createInvalidMedia("unsupported");
+      const result = MediaSchema.safeParse(unsupportedMedia);
+
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.message).toContain(
+          "Unsupported media type for AI verification"
+        );
+        expect(result.error.message).toContain("Supported types: IMAGE, TEXT");
+      }
+    });
+
+    it("should reject oversized media files", () => {
+      const oversizedMedia = createInvalidMedia("oversized");
+      const result = MediaSchema.safeParse(oversizedMedia);
+
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.message).toContain(
+          "File size exceeds maximum allowed for media type"
+        );
+      }
+    });
+
+    it("should reject invalid image formats", () => {
+      const invalidFormatMedia = createInvalidMedia("invalid_format");
+      const result = MediaSchema.safeParse(invalidFormatMedia);
+
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.message).toContain("Unsupported image format");
+        expect(result.error.message).toContain(
+          "Supported: image/jpeg, image/png, image/gif, image/webp"
+        );
+      }
+    });
+
+    it("should validate proof content for AI processing", () => {
+      const validProof = createTestProof(
+        "alice",
+        1,
+        "Valid workout with proper description"
+      );
+      const result = ProofSchema.safeParse(validProof);
+
+      expect(result.success).toBe(true);
+    });
+
+    it("should reject proof with excessive description length", () => {
+      const longDescription = "x".repeat(1001); // Over 1000 character limit
+      const invalidProof = createTestProof("alice", 1, longDescription);
+      const result = ProofSchema.safeParse(invalidProof);
+
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.message).toContain("Proof description too long");
+        expect(result.error.message).toContain("Maximum: 1000");
+      }
+    });
+
+    it("should reject proof with excessive annotation length", () => {
+      const validProof = createTestProof("alice", 1, "Valid description");
+      const longAnnotation = "y".repeat(501); // Over 500 character limit
+      validProof.annotations = [longAnnotation];
+
+      const result = ProofSchema.safeParse(validProof);
+
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.message).toContain("Annotation too long");
+        expect(result.error.message).toContain("Maximum: 500");
+      }
+    });
+
+    it("should reject empty proof with no content", () => {
+      const emptyProof: Proof = {
+        description: "",
+        media: [],
+        annotations: [],
+      };
+
+      const result = ProofSchema.safeParse(emptyProof);
+
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.message).toContain(
+          "At least one media item is required"
+        );
+      }
+    });
+
+    it("should reject proof with mixed valid and invalid media types", () => {
+      const mixedProof: Proof = {
+        description: "Valid description",
+        media: [
+          createTestMedia("alice", 1, "Valid image", "IMAGE"),
+          createInvalidMedia("unsupported"), // This should cause validation to fail
+        ],
+        annotations: ["Valid annotation"],
+      };
+
+      const result = ProofSchema.safeParse(mixedProof);
+
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.message).toContain(
+          "Unsupported media type for AI verification"
+        );
+      }
+    });
   });
 
   test("Complete Calorie Burn Game Flow", async () => {
@@ -203,6 +394,7 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
         gameId,
         gameMasterId,
         status: "APPROVED",
+        verifiedBy: "GAMEMASTER",
         notes: `Approved - Good workout session ${checkpoint}`,
       });
       expect(verifyResult.isOk()).toBe(true);
@@ -230,6 +422,7 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
         gameId,
         gameMasterId,
         status: "APPROVED",
+        verifiedBy: "GAMEMASTER",
         notes: "Good running session",
       });
       expect(verifyResult.isOk()).toBe(true);
@@ -266,6 +459,7 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
         gameId,
         gameMasterId,
         status: "APPROVED",
+        verifiedBy: "GAMEMASTER",
         notes: "Excellent CrossFit session",
       });
       expect(verifyResult.isOk()).toBe(true);
@@ -293,6 +487,7 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
         gameId,
         gameMasterId,
         status: "APPROVED",
+        verifiedBy: "GAMEMASTER",
         notes: "Good yoga session",
       });
       expect(verifyResult.isOk()).toBe(true);
@@ -324,6 +519,7 @@ describe("Calorie Burn Challenge Game - Complete Flow", () => {
       gameId,
       gameMasterId,
       status: "APPROVED",
+      verifiedBy: "GAMEMASTER",
       notes: "Nice hiking session",
     });
     expect(verifyResult.isOk()).toBe(true);

@@ -324,6 +324,15 @@ export class GameService {
       );
     }
 
+    if (new Date() > game.checkpoints[input.checkpointNumber - 1].expiryDate) {
+      return err(
+        GameErrors.CHECKPOINT_EXPIRED(input.checkpointNumber, game.id)
+      );
+    }
+
+    // Note: All media format validation (supported types, file sizes, format validation, etc.)
+    // is now handled automatically by the Zod schemas when input is parsed
+
     const checkIn: CheckIn = {
       id: uuidv4() as UUID,
       playerId: input.playerId,
@@ -334,7 +343,7 @@ export class GameService {
       status: "PENDING",
     };
 
-    // 1. Add check-in to game
+    // Store the check-in
     gameStorage.addCheckInUncheckedMut(gameId, checkIn);
 
     // 2. If AI verification is enabled, trigger automatic verification
@@ -436,7 +445,24 @@ export class GameService {
     const verificationResult = await llm.verifyCheckIn(verificationRequest);
 
     if (verificationResult.isErr()) {
-      return err(verificationResult.error);
+      // AI verification failed - mark for manual review
+      gameStorage.needsReviewCheckInUncheckedMut(
+        gameId,
+        checkInId,
+        "AI",
+        0.0, // Low confidence since AI failed
+        `AI verification failed: ${verificationResult.error.message}. Please review manually.`
+      );
+
+      const finalCheckIn = gameStorage.getCheckInUncheckedCopy(
+        gameId,
+        checkInId
+      );
+      if (!finalCheckIn) {
+        throw new Error("Check-in not found, this should never happen");
+      }
+
+      return ok(finalCheckIn);
     }
 
     const verification = verificationResult.value;
@@ -548,7 +574,7 @@ export class GameService {
         gameStorage.approveCheckInUncheckedMut(
           gameId,
           input.checkInId,
-          "GAMEMASTER",
+          input.verifiedBy,
           undefined,
           input.notes
         );
@@ -564,7 +590,7 @@ export class GameService {
         gameStorage.rejectCheckInUncheckedMut(
           gameId,
           input.checkInId,
-          "GAMEMASTER",
+          input.verifiedBy,
           undefined,
           input.notes
         );

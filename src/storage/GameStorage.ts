@@ -149,7 +149,7 @@ export class GameStorage {
   approveCheckInUncheckedMut(
     gameId: UUID,
     checkInId: UUID,
-    verifiedBy: "GAMEMASTER" | "AI",
+    verifiedBy: "GAMEMASTER" | "AI" | "TIMEOUT_APPROVAL",
     aiConfidence?: number,
     notes?: string
   ): void {
@@ -172,7 +172,7 @@ export class GameStorage {
   rejectCheckInUncheckedMut(
     gameId: UUID,
     checkInId: UUID,
-    verifiedBy: "GAMEMASTER" | "AI",
+    verifiedBy: "GAMEMASTER" | "AI" | "TIMEOUT_APPROVAL",
     aiConfidence?: number,
     notes?: string
   ): void {
@@ -258,6 +258,15 @@ export class GameStorage {
 
   exists(gameId: UUID): boolean {
     return this.games.has(gameId);
+  }
+
+  /**
+   * Get all games (deep cloned for safety)
+   */
+  getActiveGamesCopy(): Game[] {
+    return Array.from(this.games.values())
+      .filter((game) => game.state !== "ENDED")
+      .map((game) => cloneDeep(game));
   }
 }
 

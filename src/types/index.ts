@@ -81,7 +81,7 @@ export interface CheckIn {
   submittedAt: Date;
   status: CheckInStatus;
   verifiedAt?: Date;
-  verifiedBy?: "GAMEMASTER" | "AI"; // Who verified this check-in
+  verifiedBy?: "GAMEMASTER" | "AI" | "TIMEOUT_APPROVAL"; // Who verified this check-in
   aiConfidence?: number; // AI confidence level if verified by AI
   notes?: string; // GameMaster's verification notes
 }
@@ -211,40 +211,102 @@ export const MediaFormatSchema = z.enum([
   "OTHER",
 ]);
 
-export const MediaSchema = z.object({
-  id: UUIDSchema,
-  mediaUrl: z.string().min(1, "Media URL is required"),
-  mediaType: MediaFormatSchema,
-  fileName: z.string().min(1, "File name is required"),
-  fileSize: z.number().int().min(1, "File size is required"),
-  mimeType: z.string().min(1, "Mime type is required"),
-  uploadedAt: z.date().min(new Date(), "Uploaded at must be in the future"),
-  checksum: z.string().min(1, "Checksum is required"),
-  tags: z.array(z.string()).min(1, "Tags are required"),
-  metadata: z.record(z.string(), z.string()).optional(),
-});
+// Supported media types for AI verification
+const AI_SUPPORTED_MEDIA_TYPES = ["IMAGE", "TEXT"];
 
-export const ProofSchema = z.object({
-  description: z
-    .string()
-    .min(1, "Proof description required")
-    .transform((text) => {
-      if (!text) return "";
+// File size limits (in bytes)
+const MAX_IMAGE_SIZE = 20 * 1024 * 1024; // 20MB
+const MAX_TEXT_SIZE = 1 * 1024 * 1024; // 1MB
 
-      return text
-        .replace(/[<>]/g, "") // Remove angle brackets
-        .replace(/\{[^}]*"decision"[^}]*\}/gi, "[REMOVED_SUSPICIOUS_JSON]") // Remove JSON-like structures
-        .replace(/```[\s\S]*?```/g, "[REMOVED_CODE_BLOCK]") // Remove code blocks
-        .replace(/\[SYSTEM\]/gi, "[REMOVED]")
-        .replace(/\[ADMIN\]/gi, "[REMOVED]")
-        .replace(/\[OVERRIDE\]/gi, "[REMOVED]")
-        .substring(0, 1000) // Limit length
-        .trim();
-    }),
-  media: z.array(MediaSchema),
-  annotations: z
-    .array(
-      z.string().transform((text) => {
+// Supported image formats for AI processing
+const SUPPORTED_IMAGE_FORMATS = [
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+];
+
+export const MediaSchema = z
+  .object({
+    id: UUIDSchema,
+    mediaUrl: z.string().min(1, "Media URL is required"),
+    mediaType: MediaFormatSchema,
+    fileName: z.string().min(1, "File name is required"),
+    fileSize: z.number().int().min(1, "File size is required"),
+    mimeType: z.string().min(1, "Mime type is required"),
+    uploadedAt: z.date().min(new Date(), "Uploaded at must be in the future"),
+    checksum: z.string().min(1, "Checksum is required"),
+    tags: z.array(z.string()).min(1, "Tags are required"),
+    metadata: z.record(z.string(), z.string()).optional(),
+  })
+  .refine(
+    (media) => {
+      // For AI verification, only IMAGE and TEXT are supported
+      if (!AI_SUPPORTED_MEDIA_TYPES.includes(media.mediaType)) {
+        return false;
+      }
+      return true;
+    },
+    {
+      message: `Unsupported media type for AI verification. Supported types: ${AI_SUPPORTED_MEDIA_TYPES.join(", ")}`,
+      path: ["mediaType"],
+    }
+  )
+  .refine(
+    (media) => {
+      // Validate image formats
+      if (media.mediaType === "IMAGE") {
+        if (!SUPPORTED_IMAGE_FORMATS.includes(media.mimeType.toLowerCase())) {
+          return false;
+        }
+      }
+      return true;
+    },
+    {
+      message: `Unsupported image format. Supported: ${SUPPORTED_IMAGE_FORMATS.join(", ")}`,
+      path: ["mimeType"],
+    }
+  )
+  .refine(
+    (media) => {
+      // Validate file sizes
+      if (media.mediaType === "IMAGE" && media.fileSize > MAX_IMAGE_SIZE) {
+        return false;
+      }
+      if (media.mediaType === "TEXT" && media.fileSize > MAX_TEXT_SIZE) {
+        return false;
+      }
+      return true;
+    },
+    {
+      message: "File size exceeds maximum allowed for media type",
+      path: ["fileSize"],
+    }
+  )
+  .refine(
+    (media) => {
+      // Validate metadata description length
+      if (
+        media.metadata?.description &&
+        media.metadata.description.length > 2000
+      ) {
+        return false;
+      }
+      return true;
+    },
+    {
+      message: "Media description too long. Maximum: 2000 characters",
+      path: ["metadata", "description"],
+    }
+  );
+
+export const ProofSchema = z
+  .object({
+    description: z
+      .string()
+      .min(1, "Proof description required")
+      .max(1000, "Proof description too long. Maximum: 1000 characters")
+      .transform((text) => {
         if (!text) return "";
 
         return text
@@ -254,12 +316,59 @@ export const ProofSchema = z.object({
           .replace(/\[SYSTEM\]/gi, "[REMOVED]")
           .replace(/\[ADMIN\]/gi, "[REMOVED]")
           .replace(/\[OVERRIDE\]/gi, "[REMOVED]")
-          .substring(0, 1000) // Limit length
           .trim();
-      })
-    )
-    .optional(),
-});
+      }),
+    media: z.array(MediaSchema).min(1, "At least one media item is required"),
+    annotations: z
+      .array(
+        z
+          .string()
+          .max(500, "Annotation too long. Maximum: 500 characters")
+          .transform((text) => {
+            if (!text) return "";
+
+            return text
+              .replace(/[<>]/g, "") // Remove angle brackets
+              .replace(
+                /\{[^}]*"decision"[^}]*\}/gi,
+                "[REMOVED_SUSPICIOUS_JSON]"
+              ) // Remove JSON-like structures
+              .replace(/```[\s\S]*?```/g, "[REMOVED_CODE_BLOCK]") // Remove code blocks
+              .replace(/\[SYSTEM\]/gi, "[REMOVED]")
+              .replace(/\[ADMIN\]/gi, "[REMOVED]")
+              .replace(/\[OVERRIDE\]/gi, "[REMOVED]")
+              .trim();
+          })
+      )
+      .optional(),
+  })
+  .refine(
+    (proof) => {
+      // Ensure proof has meaningful content
+      const hasDescription = proof.description.trim().length > 0;
+      const hasMedia = proof.media.length > 0;
+      const hasAnnotations = proof.annotations && proof.annotations.length > 0;
+
+      return hasDescription || hasMedia || hasAnnotations;
+    },
+    {
+      message: "Proof must contain description, media, or annotations",
+      path: ["description"],
+    }
+  )
+  .refine(
+    (proof) => {
+      // Validate game type compatibility - all media must be IMAGE or TEXT for AI verification
+      const hasValidMediaTypes = proof.media.every((media) =>
+        ["IMAGE", "TEXT"].includes(media.mediaType)
+      );
+      return hasValidMediaTypes;
+    },
+    {
+      message: "All media must be IMAGE or TEXT type for AI verification",
+      path: ["media"],
+    }
+  );
 
 export const SubmitCheckInSchema = z.object({
   playerId: UUIDSchema,
@@ -283,6 +392,7 @@ export const VerifyCheckInSchema = z.object({
   checkInId: UUIDSchema,
   gameId: UUIDSchema,
   gameMasterId: UUIDSchema,
+  verifiedBy: z.enum(["GAMEMASTER", "AI", "TIMEOUT_APPROVAL"]),
   status: z.enum(["APPROVED", "REJECTED"]),
   notes: z.string().optional(),
 });

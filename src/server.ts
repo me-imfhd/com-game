@@ -9,6 +9,7 @@ import type {
 import express from "express";
 import helmet from "helmet";
 import { config, type Config } from "./config";
+import { backgroundWorker } from "./services/BackgroundWorkerService.js";
 import { AppError } from "./utils/errors";
 
 export class Server {
@@ -36,7 +37,11 @@ export class Server {
   private setupRoutes(): void {
     // Health check
     this.app.get("/health", (req: Request, res: Response) => {
-      res.json({ status: "ok", timestamp: new Date().toISOString() });
+      res.json({
+        status: "ok",
+        timestamp: new Date().toISOString(),
+        backgroundWorker: backgroundWorker.getStatus(),
+      });
     });
 
     // Original API routes
@@ -87,11 +92,33 @@ export class Server {
 
   public async start(): Promise<void> {
     try {
-      this.app.listen(this.appConfig.port, () => {
+      const server = this.app.listen(this.appConfig.port, () => {
         console.log(
-          `Server is running in ${this.appConfig.env} mode on port ${this.appConfig.port}`
+          `🚀 Server is running in ${this.appConfig.env} mode on port ${this.appConfig.port}`
+        );
+        console.log(
+          `📊 Health check: http://localhost:${this.appConfig.port}/health`
+        );
+
+        // Start background worker for game lifecycle management
+        backgroundWorker.start();
+        console.log(
+          "🔄 Background worker started for game lifecycle management"
         );
       });
+
+      // Graceful shutdown handling
+      const gracefulShutdown = (): void => {
+        console.log("🛑 Shutdown signal received, closing gracefully...");
+        backgroundWorker.stop();
+        server.close(() => {
+          console.log("✅ Server closed");
+          process.exit(0);
+        });
+      };
+
+      process.on("SIGTERM", gracefulShutdown);
+      process.on("SIGINT", gracefulShutdown);
     } catch (error) {
       console.error("Error starting server:", error);
       process.exit(1);

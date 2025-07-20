@@ -139,6 +139,8 @@ export const GameErrors = {
     new GameError(`Check-in ${checkInId} is already approved`),
   CHECK_IN_REJECTED: (checkInId: string) =>
     new GameError(`Check-in ${checkInId} has been rejected`),
+  CHECKPOINT_EXPIRED: (checkpoint: number, gameId: string) =>
+    new GameError(`Checkpoint ${checkpoint} has expired for game ${gameId}`),
 } as const;
 
 export const PlayerErrors = {
