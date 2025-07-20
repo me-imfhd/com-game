@@ -236,6 +236,41 @@ This document describes the architectural patterns, data flow, and mutation stra
    └── gameStorage.getGameCopy() → Result<Game>
 ```
 
+### Abort Game Example
+
+**Input**: `AbortGameInput: { gameId, gameMasterId }`
+
+**Flow**:
+
+1. Service Layer Validation
+   ├── Get game copy from storage
+   ├── Validate game exists
+   ├── Validate gameMasterId === game.gameMasterId (authorization)
+   └── Validate game state ≠ "ENDED" && game state ≠ "WAITING_FOR_PLAYERS"
+
+2. Refund Logic
+   ├── For each player in game.players:
+   │ ├── if player.status === "FOLDED":
+   │ │ └── Refund player's unspent stake (already cashed out portion is kept)
+   │ └── else:
+   │ ├── Assume player is still in-game (not folded or cashed out)
+   │ └── Refund player's **entire stake**
+   └── Track total refunds issued (optional sanity check)
+
+3. Player Payout Mutations
+   ├── For each player to refund: if refund amount > 0 because they could possibily already cash out
+   └── gameStorage.addTransactionUncheckedMut() (type: "REFUND")
+
+4. Bonus Pool Cleanup
+   ├── gameStorage.deductFromBonusPoolUncheckedMut(totalBonusPool)
+   └── gameStorage.addTransactionUncheckedMut() (type: "BONUS_POOL_CLEARED", reason: "Game Aborted")
+
+5. Game Abortion Finalization
+   └── gameStorage.updateGameStatusUncheckedMut("ABORTED")
+
+6. Return Final Game State
+   └── gameStorage.getGameCopy() → Result<Game>
+
 ## Mutation Patterns
 
 ### Immutability Strategy

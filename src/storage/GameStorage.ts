@@ -49,6 +49,16 @@ export class GameStorage {
     gameMutable.totalPool += amount;
   }
 
+  /**
+   * Deducts the amount from the bonus pool of the game.
+   * Panics if the game is not found.
+   */
+  cleanBonusPoolUncheckedMut(gameId: UUID): void {
+    const gameMutable = this.games.get(gameId);
+    if (!gameMutable) throw new Error("Game not found");
+    gameMutable.bonusPool = 0;
+  }
+
   updateGameStatusUncheckedMut(gameId: UUID, status: GameState): void {
     const gameMutable = this.games.get(gameId);
     if (!gameMutable) throw new Error("Game not found");

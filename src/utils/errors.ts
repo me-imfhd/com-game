@@ -125,6 +125,8 @@ export const GameErrors = {
     new GameError(`Game ${gameId} has already ended`),
   GAME_NOT_STARTED: (gameId: string) =>
     new GameError(`Game ${gameId} has not started yet`),
+  GAME_ALREADY_CANCELLED: (gameId: string) =>
+    new GameError(`Game ${gameId} has already been cancelled`),
   NOT_ENOUGH_PLAYERS: (current: number, required: number) =>
     new GameError(`Not enough players: ${current}/${required}`),
   TOO_MANY_PLAYERS: (current: number, max: number) =>

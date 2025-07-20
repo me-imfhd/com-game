@@ -2,6 +2,8 @@ import { err, ok, Result } from "neverthrow";
 import { v4 as uuidv4 } from "uuid";
 import { gameStorage } from "../storage/GameStorage.js";
 import type {
+  AbortGameInput,
+  AmountCents,
   CashoutInput,
   CheckIn,
   CreateGameInput,
@@ -16,6 +18,7 @@ import type {
   VerifyCheckInInput,
 } from "../types/index.js";
 import {
+  AbortGameSchema,
   CreateGameSchema,
   JoinGameSchema,
   MoneyUtils,
@@ -248,6 +251,110 @@ export class GameService {
       throw new Error("Game not found, this should never happen");
     }
     return ok(game);
+  }
+
+  /**
+   * Abort a game mid-game
+   * Expects game to be in IN_PROGRESS state
+   */
+  abortGame(input: AbortGameInput): Result<Game, GameError> {
+    // 1. Service Layer Validation
+    const inputParsed = AbortGameSchema.safeParse(input);
+    if (!inputParsed.success) {
+      return err(new ValidationError(inputParsed.error.message));
+    }
+    input = inputParsed.data;
+
+    const game = gameStorage.getGameCopy(input.gameId);
+    if (!game) {
+      return err(GameErrors.GAME_NOT_FOUND(input.gameId));
+    }
+
+    if (game.gameMasterId !== input.gameMasterId) {
+      return err(GameErrors.UNAUTHORIZED_GAME_MASTER(input.gameMasterId));
+    }
+
+    if (game.state === "ENDED") {
+      return err(GameErrors.GAME_ALREADY_ENDED(input.gameId));
+    }
+
+    if (game.state === "WAITING_FOR_PLAYERS") {
+      return err(GameErrors.GAME_NOT_STARTED(input.gameId));
+    }
+
+    // 2. Refund Logic
+    for (const player of game.players) {
+      const stake = game.stackSize * player.multiplier;
+      let refundAmount: AmountCents;
+
+      if (player.foldedAtCheckpoint !== undefined) {
+        // Player already folded - refund unspent stake (already cashed out portion is kept)
+        const cashoutAmount = Math.floor(
+          (stake * player.checkpointsCompleted) / game.checkpoints.length
+        );
+        refundAmount = stake - cashoutAmount;
+      } else {
+        // Player is still in-game - refund entire stake
+        refundAmount = stake;
+      }
+
+      if (refundAmount > 0) {
+        // Create refund transaction
+        const refundTransaction: Transaction = {
+          id: uuidv4() as UUID,
+          playerId: player.id,
+          gameId: input.gameId,
+          type: "REFUND",
+          amount: refundAmount,
+          timestamp: new Date(),
+          description: `Game aborted refund: ${MoneyUtils.formatCents(refundAmount)}`,
+        };
+
+        gameStorage.addTransactionUncheckedMut(input.gameId, refundTransaction);
+      }
+    }
+
+    // 4. Bonus Pool Cleanup
+    gameStorage.cleanBonusPoolUncheckedMut(input.gameId);
+
+    // 5. Game Abortion Finalization
+    gameStorage.updateGameStatusUncheckedMut(input.gameId, "ABORTED_MID_GAME");
+
+    // 6. Return Final Game State
+    const gameCopy = gameStorage.getGameCopy(input.gameId);
+    if (!gameCopy) {
+      throw new Error("Game not found, this should never happen");
+    }
+    return ok(gameCopy);
+  }
+
+  /**
+   * Cancel a game
+   * Expects game to be in WAITING_FOR_PLAYERS state
+   */
+  cancelGame(gameId: UUID, gameMasterId: UUID): Result<Game, GameError> {
+    const game = gameStorage.getGameCopy(gameId);
+    if (!game) {
+      return err(GameErrors.GAME_NOT_FOUND(gameId));
+    }
+    if (game.gameMasterId !== gameMasterId) {
+      return err(GameErrors.UNAUTHORIZED_GAME_MASTER(gameMasterId));
+    }
+    if (game.state === "IN_PROGRESS") {
+      return err(GameErrors.GAME_ALREADY_STARTED(gameId));
+    }
+    if (game.state === "ENDED") {
+      return err(GameErrors.GAME_ALREADY_ENDED(gameId));
+    }
+    if (game.state === "CANCELLED") {
+      return err(GameErrors.GAME_ALREADY_CANCELLED(gameId));
+    }
+    gameStorage.updateGameStatusUncheckedMut(gameId, "CANCELLED");
+    const gameCopy = gameStorage.getGameCopy(gameId);
+    if (!gameCopy) {
+      throw new Error("Game not found, this should never happen");
+    }
+    return ok(gameCopy);
   }
 
   // ================================================================================

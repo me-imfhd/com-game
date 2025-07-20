@@ -90,7 +90,7 @@ export interface CheckIn {
 export type VerificationMethod = "GAMEMASTER" | "AI";
 
 // Transaction Types for All Payments
-export type TransactionType = "INITIAL_STAKE" | "CASHOUT" | "PAYOUT";
+export type TransactionType = "INITIAL_STAKE" | "CASHOUT" | "PAYOUT" | "REFUND";
 
 export interface Transaction {
   id: UUID;
@@ -175,6 +175,8 @@ export const GameStateSchema = z.enum([
   "WAITING_FOR_PLAYERS",
   "IN_PROGRESS",
   "ENDED",
+  "CANCELLED",
+  "ABORTED_MID_GAME",
 ]);
 export const CheckInStatusSchema = z.enum(["PENDING", "APPROVED", "REJECTED"]);
 
@@ -406,6 +408,11 @@ export const EndGameSchema = z.object({
   gameMasterId: UUIDSchema,
 });
 
+export const AbortGameSchema = z.object({
+  gameId: UUIDSchema,
+  gameMasterId: UUIDSchema,
+});
+
 export const StartGameSchema = z.object({
   gameId: UUIDSchema,
   gameMasterId: UUIDSchema,
@@ -525,6 +532,7 @@ export type VerifyCheckInInput = z.infer<typeof VerifyCheckInSchema>;
 export type CashoutInput = z.infer<typeof CashoutSchema>;
 export type StartGameInput = z.infer<typeof StartGameSchema>;
 export type EndGameInput = z.infer<typeof EndGameSchema>;
+export type AbortGameInput = z.infer<typeof AbortGameSchema>;
 
 // ================================================================================
 // USAGE EXAMPLES:
